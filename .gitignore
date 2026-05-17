@@ -28,3 +28,27 @@ envs/curobo/*
 
 /*.json*
 /*.txt
+# =====================================================================
+# Local generated files from this machine
+# =====================================================================
+
+# All log directories and log files, including logs_single_*
+**/logs*/
+*.log
+
+# ACT generated data and checkpoints
+policy/ACT/processed_data/
+policy/ACT/act_ckpt/
+
+# Large generated file types observed locally
+*.ckpt
+*.hdf5
+*.npz
+
+# Keep Motus source code under policy/Motus/models
+!policy/Motus/models/
+!policy/Motus/models/**
+
+# But still ignore Python cache files under Motus
+policy/Motus/**/__pycache__/
+policy/Motus/**/*.pyc
