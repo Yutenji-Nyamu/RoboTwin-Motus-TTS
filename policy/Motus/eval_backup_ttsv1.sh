@@ -16,44 +16,11 @@ if [ $# -gt 0 ]; then
     shift
 fi
 
-# GPU_ID=0
-# TTS_ENABLE=False
-# TTS_NUM_SAMPLES=8
-# TTS_LOG_ACTIONS=True
-# TTS_SAVE_FULL_ACTIONS=True
-
-# ttsv2 add
 GPU_ID=0
-
-# Test-time scaling
 TTS_ENABLE=False
 TTS_NUM_SAMPLES=8
-
-# Selection method:
-#   global_medoid:  average-L2/global-medoid selection
-#   keystone:       KeyStone-style guard + kmeans + largest-cluster medoid
-#   rank_softmax:   rank-based stochastic selection, P(i)=softmax(-rank_i/tau)
-TTS_METHOD="global_medoid"
-
-# KeyStone defaults
-TTS_NUM_CLUSTERS=2
-
-# TTS_TAU=0.3
-
-# tau meaning:
-#   keystone:     unimodality guard threshold, default 0.3
-#   rank_softmax: rank-softmax temperature, recommended 1.0
-TTS_TAU=0.3
-
-TTS_KMEANS_ITERS=10
-
-# Logging
 TTS_LOG_ACTIONS=True
-
-# Deprecated/no-op in the new Python implementation.
-# 保留这个参数只是为了兼容旧命令；新版本不再保存 .npz。
-TTS_SAVE_FULL_ACTIONS=False
-# ttsv2 add end
+TTS_SAVE_FULL_ACTIONS=True
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -73,22 +40,6 @@ while [[ $# -gt 0 ]]; do
             TTS_NUM_SAMPLES="$2"
             shift 2
             ;;
-        --tts-method)
-            TTS_METHOD="$2"
-            shift 2
-            ;;
-        --tts-num-clusters)
-            TTS_NUM_CLUSTERS="$2"
-            shift 2
-            ;;
-        --tts-tau)
-            TTS_TAU="$2"
-            shift 2
-            ;;
-        --tts-kmeans-iters)
-            TTS_KMEANS_ITERS="$2"
-            shift 2
-            ;;            
         --tts-log-actions)
             TTS_LOG_ACTIONS="$2"
             shift 2
@@ -254,18 +205,10 @@ echo "VLM Path:          $VLM_PATH"
 echo "Task Config:       $TASK_CONFIG"
 echo "Seed:              $SEED"
 echo "Log File:          $log_file"
-# echo "TTS Enable:        $TTS_ENABLE" #tts add
-# echo "TTS Num Samples:   $TTS_NUM_SAMPLES" #tts add
-# echo "TTS Log Actions:   $TTS_LOG_ACTIONS" #tts add
-# echo "TTS Save Full:     $TTS_SAVE_FULL_ACTIONS" #tts add
-echo "TTS Enable:        $TTS_ENABLE"
-echo "TTS Num Samples:   $TTS_NUM_SAMPLES"
-echo "TTS Method:        $TTS_METHOD"
-echo "TTS Num Clusters:  $TTS_NUM_CLUSTERS"
-echo "TTS Tau:           $TTS_TAU"
-echo "TTS KMeans Iters:  $TTS_KMEANS_ITERS"
-echo "TTS Log Actions:   $TTS_LOG_ACTIONS"
-echo "TTS Save Full:     $TTS_SAVE_FULL_ACTIONS (deprecated; npz disabled)"
+echo "TTS Enable:        $TTS_ENABLE" #tts add
+echo "TTS Num Samples:   $TTS_NUM_SAMPLES" #tts add
+echo "TTS Log Actions:   $TTS_LOG_ACTIONS" #tts add
+echo "TTS Save Full:     $TTS_SAVE_FULL_ACTIONS" #tts add
 echo "================================================================"
 echo ""
 
@@ -314,10 +257,6 @@ PYTHONWARNINGS=ignore::UserWarning \
     --vlm_path "${VLM_PATH}" \
     --tts_enable "${TTS_ENABLE}" \
     --tts_num_samples "${TTS_NUM_SAMPLES}" \
-    --tts_method "${TTS_METHOD}" \
-    --tts_num_clusters "${TTS_NUM_CLUSTERS}" \
-    --tts_tau "${TTS_TAU}" \
-    --tts_kmeans_iters "${TTS_KMEANS_ITERS}" \
     --tts_log_actions "${TTS_LOG_ACTIONS}" \
     --tts_save_full_actions "${TTS_SAVE_FULL_ACTIONS}" \
     2>&1 | tee "$log_file"

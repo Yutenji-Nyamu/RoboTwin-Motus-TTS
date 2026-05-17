@@ -52,3 +52,11 @@ policy/ACT/act_ckpt/
 # But still ignore Python cache files under Motus
 policy/Motus/**/__pycache__/
 policy/Motus/**/*.pyc
+
+# Motus local generated logs
+policy/Motus/log/
+policy/Motus/logs/
+policy/Motus/logs_single_*/
+
+# Evaluation outputs
+eval_result/
