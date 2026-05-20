@@ -1,4 +1,5 @@
 # Motus Policy for RoboTwin
+# impl and exp of tts and opd
 
 # for save csv
 import csv
@@ -36,14 +37,6 @@ from utils.image_utils import resize_with_padding
 
 logger = logging.getLogger(__name__)
 
-# # =========================
-# # Test-Time Scaling Defaults
-# # =========================
-# DEFAULT_TTS_ENABLE = False
-# DEFAULT_TTS_NUM_SAMPLES = 1
-# DEFAULT_TTS_LOG_ACTIONS = True
-# DEFAULT_TTS_SAVE_FULL_ACTIONS = True
-
 # =========================
 # Test-Time Scaling Defaults
 # =========================
@@ -51,23 +44,25 @@ DEFAULT_TTS_ENABLE = False
 DEFAULT_TTS_NUM_SAMPLES = 8
 
 # Methods:
-#   global_medoid: average-L2/global-medoid selection
-#   keystone:      unimodality guard + kmeans + largest-cluster medoid
-#   rank_softmax:  rank-based stochastic selection, P(i)=softmax(-rank_i/tau)
+#   global_medoid:          average-L2/global-medoid selection
+#   keystone:               unimodality guard + kmeans + largest-cluster medoid
+#   rank_softmax:           rank-based stochastic selection, P(i)=softmax(-rank_i/tau)
+#   cluster_rank_softmax:   unimodality guard + kmeans largest-cluster + local rank-softmax
 DEFAULT_TTS_METHOD = "global_medoid"
-
-# # KeyStone-style defaults
-# DEFAULT_TTS_NUM_CLUSTERS = 2
-# DEFAULT_TTS_TAU = 0.3
-# DEFAULT_TTS_KMEANS_ITERS = 10
 
 # TTS defaults
 DEFAULT_TTS_NUM_CLUSTERS = 2
 
 # tau meaning:
-#   keystone:     unimodality guard threshold
-#   rank_softmax: rank-softmax temperature
+#   keystone:               unimodality guard threshold
+#   cluster_rank_softmax:   unimodality guard threshold
+#   rank_softmax:           rank-softmax temperature, kept for backward compatibility
 DEFAULT_TTS_TAU = 0.3
+
+# tts v3 add
+# Separate rank-softmax temperature for cluster_rank_softmax.
+# This avoids overloading DEFAULT_TTS_TAU, whose default is tuned as a guard threshold.
+DEFAULT_TTS_RANK_TAU = 1.0
 
 DEFAULT_TTS_KMEANS_ITERS = 10
 
@@ -100,16 +95,13 @@ class MotusPolicy:
         vlm_path: str, 
         device: str = "cuda", 
         log_dir: Optional[str] = None, 
-        task_name: Optional[str] = None,
-        # tts_enable: bool = DEFAULT_TTS_ENABLE,
-        # tts_num_samples: int = DEFAULT_TTS_NUM_SAMPLES,
-        # tts_log_actions: bool = DEFAULT_TTS_LOG_ACTIONS,
-        # tts_save_full_actions: bool = DEFAULT_TTS_SAVE_FULL_ACTIONS,   
+        task_name: Optional[str] = None, 
         tts_enable: bool = DEFAULT_TTS_ENABLE,
         tts_num_samples: int = DEFAULT_TTS_NUM_SAMPLES,
         tts_method: str = DEFAULT_TTS_METHOD,
         tts_num_clusters: int = DEFAULT_TTS_NUM_CLUSTERS,
         tts_tau: float = DEFAULT_TTS_TAU,
+        tts_rank_tau: float = DEFAULT_TTS_RANK_TAU,
         tts_kmeans_iters: int = DEFAULT_TTS_KMEANS_ITERS,
         tts_log_actions: bool = DEFAULT_TTS_LOG_ACTIONS,
         tts_save_full_actions: bool = DEFAULT_TTS_SAVE_FULL_ACTIONS,             
@@ -154,15 +146,6 @@ class MotusPolicy:
         # Initialize image saving
         self.save_images = True
         
-        # base_log_dir = log_dir or os.environ.get('LOG_DIR') or str(Path(__file__).resolve().parent.parent / "logs")
-        # task_dir_name = task_name or os.environ.get('TASK_NAME') or "default_task"
-        # self.save_dir = Path(base_log_dir) / "images" / task_dir_name
-        # self.save_dir.mkdir(parents=True, exist_ok=True)
-        # self.episode_count = 0
-        # self.step_count = 0
-
-        # logger.info("Motus Policy initialized successfully")
-        
         
         # tts add
         
@@ -174,39 +157,19 @@ class MotusPolicy:
 
         self.save_dir = self.log_dir / "images" / task_dir_name
         self.save_dir.mkdir(parents=True, exist_ok=True)
-
-        # self.tts_enable = bool(tts_enable)
-        # self.tts_num_samples = max(1, int(tts_num_samples))
-        # self.tts_log_actions = bool(tts_log_actions)
-        # self.tts_save_full_actions = bool(tts_save_full_actions)
-        
-        # self.tts_enable = _as_bool(tts_enable)
-        # self.tts_num_samples = max(1, int(tts_num_samples))
-        # self.tts_log_actions = _as_bool(tts_log_actions)
-        # self.tts_save_full_actions = _as_bool(tts_save_full_actions)
-        
-        # self.tts_dir = self.log_dir / "tts" / task_dir_name
-
-        # if self.tts_enable and self.tts_save_full_actions:
-        #     self.tts_dir.mkdir(parents=True, exist_ok=True)
-
-        # self.episode_count = 0
-        # self.step_count = 0
-
-        # print(
-        #     f"[TTS] enable={self.tts_enable}, "
-        #     f"num_samples={self.tts_num_samples}, "
-        #     f"log_actions={self.tts_log_actions}, "
-        #     f"save_full_actions={self.tts_save_full_actions}, "
-        #     f"tts_dir={self.tts_dir}"
-        # )
         
         self.tts_enable = _as_bool(tts_enable)
         self.tts_num_samples = max(1, int(tts_num_samples))
 
         self.tts_method = str(tts_method).strip().lower()
-        # allowed_tts_methods = {"global_medoid", "keystone"}
-        allowed_tts_methods = {"global_medoid", "keystone", "rank_softmax"}
+        
+        allowed_tts_methods = {
+            "global_medoid",
+            "keystone",
+            "rank_softmax",
+            "cluster_rank_softmax",
+        }
+        
         if self.tts_method not in allowed_tts_methods:
             raise ValueError(
                 f"Unknown tts_method={self.tts_method}. "
@@ -215,6 +178,7 @@ class MotusPolicy:
 
         self.tts_num_clusters = max(1, int(tts_num_clusters))
         self.tts_tau = float(tts_tau)
+        self.tts_rank_tau = float(tts_rank_tau)
         self.tts_kmeans_iters = max(1, int(tts_kmeans_iters))
 
         self.tts_log_actions = _as_bool(tts_log_actions)
@@ -236,6 +200,7 @@ class MotusPolicy:
             f"method={self.tts_method}, "
             f"num_clusters={self.tts_num_clusters}, "
             f"tau={self.tts_tau}, "
+            f"rank_tau={self.tts_rank_tau}, "
             f"kmeans_iters={self.tts_kmeans_iters}, "
             f"log_actions={self.tts_log_actions}, "
             f"save_full_actions={self.tts_save_full_actions} (deprecated/no-op), "
@@ -388,137 +353,6 @@ class MotusPolicy:
                 vlm_inputs=[vlm_inputs],
             )
         return predicted_frames, predicted_actions
-
-    # # tts add
-    # def _select_tts_medoid(self, actions_stack: torch.Tensor):
-    #     # actions_stack: [N, H, D], already on CPU
-    #     n = actions_stack.shape[0]
-    #     flat_actions = actions_stack.reshape(n, -1)
-    #     pairwise_l2 = torch.cdist(flat_actions, flat_actions, p=2)
-    #     avg_l2 = pairwise_l2.sum(dim=1) / (n - 1)
-    #     best_idx = int(torch.argmin(avg_l2).item())
-    #     return best_idx, pairwise_l2, avg_l2
-
-    # # # tts add
-    # # def _log_tts_result(self, actions_stack, pairwise_l2, avg_l2, best_idx):
-    # #     if not self.tts_log_actions:
-    # #         return
-
-    # #     avg_list = [round(float(x), 6) for x in avg_l2]
-    # #     print(
-    # #         f"[TTS] episode={self.episode_count} "
-    # #         f"step={self.step_count} "
-    # #         f"samples={actions_stack.shape[0]} "
-    # #         f"best={best_idx} "
-    # #         f"avg_l2={avg_list}"
-    # #     )
-
-    # #     pairwise_np = pairwise_l2.numpy()
-    # #     print(
-    # #         "[TTS] pairwise_l2=\n"
-    # #         + np.array2string(pairwise_np, precision=4, suppress_small=True)
-    # #     )
-
-    # #     if self.tts_save_full_actions:
-    # #         save_path = self.tts_dir / f"episode_{self.episode_count:04d}_step_{self.step_count:04d}.npz"
-    # #         np.savez_compressed(
-    # #             save_path,
-    # #             actions=actions_stack.numpy(),
-    # #             pairwise_l2=pairwise_l2.numpy(),
-    # #             avg_l2=avg_l2.numpy(),
-    # #             best_idx=np.array(best_idx, dtype=np.int64),
-    # #         )
-    # #         print(f"[TTS] saved full action chunks to {save_path}")
-
-    # # tts add
-    # def _log_tts_result(self, actions_stack, pairwise_l2, avg_l2, best_idx):
-    #     if not self.tts_log_actions:
-    #         return
-
-    #     self.tts_dir.mkdir(parents=True, exist_ok=True)
-
-    #     avg_l2_np = avg_l2.numpy()
-    #     pairwise_l2_np = pairwise_l2.numpy()
-    #     actions_np = actions_stack.numpy()
-
-    #     best_avg_l2 = float(avg_l2_np[best_idx])
-    #     min_avg_l2 = float(avg_l2_np.min())
-    #     max_avg_l2 = float(avg_l2_np.max())
-    #     mean_avg_l2 = float(avg_l2_np.mean())
-
-    #     avg_list = [round(float(x), 6) for x in avg_l2_np]
-
-    #     print(
-    #         f"[TTS] episode={self.episode_count} "
-    #         f"step={self.step_count} "
-    #         f"samples={actions_stack.shape[0]} "
-    #         f"best={best_idx} "
-    #         f"best_avg_l2={best_avg_l2:.6f} "
-    #         f"min_avg_l2={min_avg_l2:.6f} "
-    #         f"max_avg_l2={max_avg_l2:.6f}"
-    #     )
-
-    #     summary_path = self.tts_dir / "summary.csv"
-    #     write_header = not summary_path.exists()
-
-    #     with open(summary_path, "a", newline="") as f:
-    #         writer = csv.writer(f)
-    #         if write_header:
-    #             writer.writerow([
-    #                 "episode",
-    #                 "step",
-    #                 "samples",
-    #                 "best_idx",
-    #                 "best_avg_l2",
-    #                 "min_avg_l2",
-    #                 "max_avg_l2",
-    #                 "mean_avg_l2",
-    #                 "avg_l2",
-    #                 "npz_path",
-    #             ])
-
-    #         npz_path = ""
-    #         if self.tts_save_full_actions:
-    #             npz_path = str(self.tts_dir / f"episode_{self.episode_count:04d}_step_{self.step_count:04d}.npz")
-
-    #         writer.writerow([
-    #             self.episode_count,
-    #             self.step_count,
-    #             actions_stack.shape[0],
-    #             best_idx,
-    #             f"{best_avg_l2:.8f}",
-    #             f"{min_avg_l2:.8f}",
-    #             f"{max_avg_l2:.8f}",
-    #             f"{mean_avg_l2:.8f}",
-    #             avg_list,
-    #             npz_path,
-    #         ])
-
-    #     if self.tts_save_full_actions:
-    #         save_path = self.tts_dir / f"episode_{self.episode_count:04d}_step_{self.step_count:04d}.npz"
-    #         np.savez_compressed(
-    #             save_path,
-    #             actions=actions_np,
-    #             pairwise_l2=pairwise_l2_np,
-    #             avg_l2=avg_l2_np,
-    #             best_idx=np.array(best_idx, dtype=np.int64),
-    #         )
-    #         # print(f"[TTS] saved full action chunks to {save_path}")
-
-    # # tts add
-    # def _select_tts_action(self, actions_stack: torch.Tensor):
-    #     """
-    #     Dispatch TTS selector according to self.tts_method.
-
-    #     actions_stack: [K, H, D], CPU tensor.
-    #     """
-    #     if self.tts_method == "global_medoid":
-    #         return self._select_tts_global_medoid(actions_stack)
-
-    #     if self.tts_method == "keystone":
-    #         return self._select_tts_keystone(actions_stack)
-
-    #     raise ValueError(f"Unknown tts_method={self.tts_method}")
     
     # tts v2 add
     def _select_tts_action(self, actions_stack: torch.Tensor):
@@ -531,10 +365,13 @@ class MotusPolicy:
             return self._select_tts_global_medoid(actions_stack)
 
         if self.tts_method == "keystone":
-            return self._select_tts_keystone(actions_stack)
-
+            return self._select_tts_keystone(actions_stack)  
+        
         if self.tts_method == "rank_softmax":
             return self._select_tts_rank_softmax(actions_stack)
+
+        if self.tts_method == "cluster_rank_softmax":
+            return self._select_tts_cluster_rank_softmax(actions_stack)
 
         raise ValueError(f"Unknown tts_method={self.tts_method}")    
 
@@ -575,19 +412,6 @@ class MotusPolicy:
         ranks, order = self._build_tts_ranks(avg_l2)
         selection_probs = torch.zeros(k, dtype=torch.float32, device=avg_l2.device)
         selection_probs[best_idx] = 1.0
-
-        # metrics = {
-        #     "tts_method": "global_medoid",
-        #     "selection_stage": "global_medoid",
-        #     "global_medoid_idx": best_idx,
-        #     "unimodal": True,
-        #     "s_score": "",
-        #     "num_clusters": 1,
-        #     "selected_cluster": -1,
-        #     "selected_cluster_size": k,
-        #     "cluster_counts": "",
-        #     "cluster_ids": "",
-        # }
         
         # ttsv2 add
         metrics = {
@@ -671,6 +495,136 @@ class MotusPolicy:
         }
 
         return selected_idx, pairwise_l2, avg_l2, metrics    
+
+    # ttsv3 add
+    def _select_tts_cluster_rank_softmax(self, actions_stack: torch.Tensor):
+        """
+        L2 min + Cluster + Random selector.
+
+        1. Compute global average-L2 medoid scores.
+        2. Run the same unimodality guard used by KeyStone.
+        3. If the guard says the samples are unimodal, sample from all candidates by rank-softmax.
+        4. Otherwise, run deterministic k-means, keep the largest cluster, and sample only inside
+        that cluster by local intra-cluster rank-softmax.
+
+        self.tts_tau is the unimodality guard threshold.
+        self.tts_rank_tau is the rank-softmax temperature.
+        """
+        k = actions_stack.shape[0]
+        flat_actions = actions_stack.reshape(k, -1)
+
+        pairwise_l2 = torch.cdist(flat_actions, flat_actions, p=2)
+
+        if k <= 1:
+            avg_l2 = torch.zeros(k, dtype=pairwise_l2.dtype, device=pairwise_l2.device)
+            ranks = torch.zeros(k, dtype=torch.long, device=pairwise_l2.device)
+            selection_probs = torch.ones(k, dtype=torch.float32, device=pairwise_l2.device)
+
+            metrics = {
+                "tts_method": "cluster_rank_softmax",
+                "selection_stage": "single_sample",
+                "global_medoid_idx": 0,
+                "unimodal": True,
+                "s_score": "",
+                "num_clusters": 1,
+                "selected_cluster": -1,
+                "selected_cluster_size": k,
+                "cluster_counts": "",
+                "cluster_ids": "",
+                "selected_idx": 0,
+                "selected_rank": 0,
+                "selected_prob": "1.00000000",
+                "rank_temperature": f"{float(self.tts_rank_tau):.8f}",
+                "rank_ids": "|".join(map(str, ranks.detach().cpu().tolist())),
+                "selection_probs": "|".join(f"{float(x):.8f}" for x in selection_probs.detach().cpu().tolist()),
+            }
+            return 0, pairwise_l2, avg_l2, metrics
+
+        global_medoid_idx, avg_l2, s_score = self._compute_global_medoid_and_guard(
+            flat_actions=flat_actions,
+            pairwise_l2=pairwise_l2,
+        )
+
+        use_all_candidates = s_score < self.tts_tau or self.tts_num_clusters <= 1
+
+        if use_all_candidates:
+            candidate_indices = torch.arange(k, dtype=torch.long, device=avg_l2.device)
+            local_scores = avg_l2
+
+            selection_stage = "guard_rank_softmax" if s_score < self.tts_tau else "no_cluster_rank_softmax"
+            unimodal = bool(s_score < self.tts_tau)
+            num_clusters = 1
+            selected_cluster = -1
+            selected_cluster_size = k
+            cluster_counts = ""
+            cluster_ids = ""
+        else:
+            num_clusters = min(self.tts_num_clusters, k)
+            cluster_ids_tensor = self._kmeans_small(
+                flat_actions,
+                num_clusters=num_clusters,
+                max_iter=self.tts_kmeans_iters,
+            )
+
+            cluster_counts_tensor = torch.bincount(cluster_ids_tensor, minlength=num_clusters)
+            selected_cluster = int(torch.argmax(cluster_counts_tensor).item())
+
+            mask = cluster_ids_tensor == selected_cluster
+            candidate_indices = mask.nonzero(as_tuple=True)[0]
+            selected_cluster_size = int(cluster_counts_tensor[selected_cluster].item())
+
+            sub_dists = pairwise_l2[mask][:, mask]
+            if selected_cluster_size <= 1:
+                local_scores = torch.zeros(
+                    selected_cluster_size,
+                    dtype=pairwise_l2.dtype,
+                    device=pairwise_l2.device,
+                )
+            else:
+                local_scores = sub_dists.sum(dim=1) / (selected_cluster_size - 1)
+
+            selection_stage = "cluster_rank_softmax"
+            unimodal = False
+            cluster_counts = "|".join(map(str, cluster_counts_tensor.detach().cpu().tolist()))
+            cluster_ids = "|".join(map(str, cluster_ids_tensor.detach().cpu().tolist()))
+
+        local_ranks, _ = self._build_tts_ranks(local_scores)
+        rank_tau = max(1e-8, float(self.tts_rank_tau))
+
+        logits = -local_ranks.to(torch.float32) / rank_tau
+        local_probs = torch.softmax(logits, dim=0)
+
+        selected_local_idx = int(torch.multinomial(local_probs, num_samples=1).item())
+        selected_idx = int(candidate_indices[selected_local_idx].item())
+        selected_rank = int(local_ranks[selected_local_idx].item())
+        selected_prob = float(local_probs[selected_local_idx].item())
+
+        rank_ids = torch.full((k,), -1, dtype=torch.long, device=avg_l2.device)
+        rank_ids[candidate_indices] = local_ranks
+
+        selection_probs = torch.zeros(k, dtype=torch.float32, device=avg_l2.device)
+        selection_probs[candidate_indices] = local_probs
+
+        metrics = {
+            "tts_method": "cluster_rank_softmax",
+            "selection_stage": selection_stage,
+            "global_medoid_idx": global_medoid_idx,
+            "unimodal": unimodal,
+            "s_score": f"{s_score:.8f}",
+            "num_clusters": num_clusters,
+            "selected_cluster": selected_cluster,
+            "selected_cluster_size": selected_cluster_size,
+            "cluster_counts": cluster_counts,
+            "cluster_ids": cluster_ids,
+            "selected_idx": selected_idx,
+            "selected_rank": selected_rank,
+            "selected_prob": f"{selected_prob:.8f}",
+            "rank_temperature": f"{float(self.tts_rank_tau):.8f}",
+            "rank_ids": "|".join(map(str, rank_ids.detach().cpu().tolist())),
+            "selection_probs": "|".join(f"{float(x):.8f}" for x in selection_probs.detach().cpu().tolist()),
+        }
+
+        return selected_idx, pairwise_l2, avg_l2, metrics
 
     # tts add
     def _compute_global_medoid_and_guard(
@@ -884,107 +838,6 @@ class MotusPolicy:
         }
 
         return best_idx, pairwise_l2, avg_l2, metrics
-
-    # # tts add
-    # # def _log_tts_result(self, actions_stack, pairwise_l2, avg_l2, best_idx, metrics):
-    # def _log_tts_result(self, actions_stack, pairwise_l2, avg_l2, selected_idx, metrics):
-    #     """
-    #     Log TTS selector information.
-
-    #     Important:
-    #     - Fixed CSV schema for all methods.
-    #     - No .npz saving.
-    #     - Unsupported fields for a method are filled with empty string or -1.
-    #     """
-    #     if not self.tts_log_actions:
-    #         return
-
-    #     self.tts_dir.mkdir(parents=True, exist_ok=True)
-
-    #     avg_l2_np = avg_l2.detach().cpu().numpy()
-
-    #     best_avg_l2 = float(avg_l2_np[best_idx])
-    #     min_avg_l2 = float(avg_l2_np.min())
-    #     max_avg_l2 = float(avg_l2_np.max())
-    #     mean_avg_l2 = float(avg_l2_np.mean())
-
-    #     avg_list = "|".join(f"{float(x):.6f}" for x in avg_l2_np)
-
-    #     print(
-    #         f"[TTS] episode={self.episode_count} "
-    #         f"step={self.step_count} "
-    #         f"method={metrics.get('tts_method', self.tts_method)} "
-    #         f"stage={metrics.get('selection_stage', '')} "
-    #         f"samples={actions_stack.shape[0]} "
-    #         f"C={self.tts_num_clusters} "
-    #         f"tau={self.tts_tau} "
-    #         f"kmeans_iters={self.tts_kmeans_iters} "
-    #         f"best={best_idx} "
-    #         f"global_medoid={metrics.get('global_medoid_idx', '')} "
-    #         f"unimodal={metrics.get('unimodal', '')} "
-    #         f"s_score={metrics.get('s_score', '')} "
-    #         f"selected_cluster={metrics.get('selected_cluster', '')} "
-    #         f"cluster_size={metrics.get('selected_cluster_size', '')} "
-    #         f"cluster_counts={metrics.get('cluster_counts', '')} "
-    #         f"best_avg_l2={best_avg_l2:.6f} "
-    #         f"min_avg_l2={min_avg_l2:.6f} "
-    #         f"max_avg_l2={max_avg_l2:.6f}"
-    #     )
-
-    #     summary_path = self.tts_dir / "summary.csv"
-    #     write_header = not summary_path.exists()
-
-    #     with open(summary_path, "a", newline="") as f:
-    #         writer = csv.writer(f)
-
-    #         if write_header:
-    #             writer.writerow([
-    #                 "episode",
-    #                 "step",
-    #                 "samples",
-    #                 "tts_method",
-    #                 "selection_stage",
-    #                 "best_idx",
-    #                 "global_medoid_idx",
-    #                 "unimodal",
-    #                 "s_score",
-    #                 "num_clusters",
-    #                 "tau",
-    #                 "kmeans_iters",
-    #                 "selected_cluster",
-    #                 "selected_cluster_size",
-    #                 "cluster_counts",
-    #                 "cluster_ids",
-    #                 "best_avg_l2",
-    #                 "min_avg_l2",
-    #                 "max_avg_l2",
-    #                 "mean_avg_l2",
-    #                 "avg_l2",
-    #             ])
-
-    #         writer.writerow([
-    #             self.episode_count,
-    #             self.step_count,
-    #             actions_stack.shape[0],
-    #             metrics.get("tts_method", self.tts_method),
-    #             metrics.get("selection_stage", ""),
-    #             best_idx,
-    #             metrics.get("global_medoid_idx", ""),
-    #             metrics.get("unimodal", ""),
-    #             metrics.get("s_score", ""),
-    #             metrics.get("num_clusters", self.tts_num_clusters),
-    #             self.tts_tau,
-    #             self.tts_kmeans_iters,
-    #             metrics.get("selected_cluster", ""),
-    #             metrics.get("selected_cluster_size", ""),
-    #             metrics.get("cluster_counts", ""),
-    #             metrics.get("cluster_ids", ""),
-    #             f"{best_avg_l2:.8f}",
-    #             f"{min_avg_l2:.8f}",
-    #             f"{max_avg_l2:.8f}",
-    #             f"{mean_avg_l2:.8f}",
-    #             avg_list,
-    #         ])
     
     # ttsv2 add
     def _log_tts_result(self, actions_stack, pairwise_l2, avg_l2, selected_idx, metrics):
@@ -1023,6 +876,7 @@ class MotusPolicy:
             f"samples={actions_stack.shape[0]} "
             f"C={self.tts_num_clusters} "
             f"tau={self.tts_tau} "
+            f"rank_tau={metrics.get('rank_temperature', '')} "
             f"kmeans_iters={self.tts_kmeans_iters} "
             f"selected={selected_idx} "
             f"selected_rank={metrics.get('selected_rank', '')} "
@@ -1144,18 +998,6 @@ class MotusPolicy:
         # Build VLM inputs
         first_frame_pil = self._tensor_to_pil_image(current_frame.squeeze(0).cpu())
         vlm_inputs = self._preprocess_vlm_messages(instruction, first_frame_pil)
-
-
-        # # Run inference
-        # num_inference_steps = self.config_dict['model']['inference']['num_inference_timesteps']
-        # with torch.no_grad():
-        #     predicted_frames, predicted_actions = self.model.inference_step(
-        #         first_frame=current_frame,
-        #         state=self.current_state,
-        #         num_inference_steps=num_inference_steps,
-        #         language_embeddings=t5_list,
-        #         vlm_inputs=[vlm_inputs],
-        #     )
         
         # tts add 
         # Run inference
@@ -1175,20 +1017,6 @@ class MotusPolicy:
 
                 action_candidates.append(cand_actions.squeeze(0).detach().float().cpu())
                 frame_candidates.append(cand_frames.detach().float().cpu() if cand_frames is not None else None)
-
-            # actions_stack = torch.stack(action_candidates, dim=0)
-            # best_idx, pairwise_l2, avg_l2 = self._select_tts_medoid(actions_stack)
-            # self._log_tts_result(actions_stack, pairwise_l2, avg_l2, best_idx)
-
-            # predicted_actions = actions_stack[best_idx].unsqueeze(0)
-            # predicted_frames = frame_candidates[best_idx]
-            
-            # actions_stack = torch.stack(action_candidates, dim=0)
-            # best_idx, pairwise_l2, avg_l2, metrics = self._select_tts_action(actions_stack)
-            # self._log_tts_result(actions_stack, pairwise_l2, avg_l2, best_idx, metrics)
-
-            # predicted_actions = actions_stack[best_idx].unsqueeze(0)
-            # predicted_frames = frame_candidates[best_idx]
             
             actions_stack = torch.stack(action_candidates, dim=0)
             selected_idx, pairwise_l2, avg_l2, metrics = self._select_tts_action(actions_stack)
@@ -1359,12 +1187,6 @@ def get_model(usr_args):
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # # tts add
-    # tts_enable = _as_bool(usr_args.get("tts_enable", DEFAULT_TTS_ENABLE))
-    # tts_num_samples = int(usr_args.get("tts_num_samples", DEFAULT_TTS_NUM_SAMPLES))
-    # tts_log_actions = _as_bool(usr_args.get("tts_log_actions", DEFAULT_TTS_LOG_ACTIONS))
-    # tts_save_full_actions = _as_bool(usr_args.get("tts_save_full_actions", DEFAULT_TTS_SAVE_FULL_ACTIONS))
-    
     # tts add
     tts_enable = _as_bool(usr_args.get("tts_enable", DEFAULT_TTS_ENABLE))
     tts_num_samples = int(usr_args.get("tts_num_samples", DEFAULT_TTS_NUM_SAMPLES))
@@ -1372,6 +1194,7 @@ def get_model(usr_args):
     tts_method = str(usr_args.get("tts_method", DEFAULT_TTS_METHOD))
     tts_num_clusters = int(usr_args.get("tts_num_clusters", DEFAULT_TTS_NUM_CLUSTERS))
     tts_tau = float(usr_args.get("tts_tau", DEFAULT_TTS_TAU))
+    tts_rank_tau = float(usr_args.get("tts_rank_tau", DEFAULT_TTS_RANK_TAU))
     tts_kmeans_iters = int(usr_args.get("tts_kmeans_iters", DEFAULT_TTS_KMEANS_ITERS))
 
     tts_log_actions = _as_bool(usr_args.get("tts_log_actions", DEFAULT_TTS_LOG_ACTIONS))
@@ -1380,16 +1203,6 @@ def get_model(usr_args):
     tts_save_full_actions = _as_bool(
         usr_args.get("tts_save_full_actions", DEFAULT_TTS_SAVE_FULL_ACTIONS)
     )
-    
-    # policy = MotusPolicy(
-    #     checkpoint_path=checkpoint_path,
-    #     wan_path=wan_path,
-    #     vlm_path=vlm_path,
-    #     config_path=str(config_path),
-    #     device=device,
-    #     log_dir=usr_args.get('log_dir'),
-    #     task_name=usr_args.get('task_name')
-    # )
     
     # tts add
     policy = MotusPolicy(
@@ -1400,15 +1213,12 @@ def get_model(usr_args):
         device=device,
         log_dir=usr_args.get('log_dir'),
         task_name=usr_args.get('task_name'),
-        # tts_enable=tts_enable,
-        # tts_num_samples=tts_num_samples,
-        # tts_log_actions=tts_log_actions,
-        # tts_save_full_actions=tts_save_full_actions,
         tts_enable=tts_enable,
         tts_num_samples=tts_num_samples,
         tts_method=tts_method,
         tts_num_clusters=tts_num_clusters,
         tts_tau=tts_tau,
+        tts_rank_tau=tts_rank_tau,
         tts_kmeans_iters=tts_kmeans_iters,
         tts_log_actions=tts_log_actions,
         tts_save_full_actions=tts_save_full_actions,        

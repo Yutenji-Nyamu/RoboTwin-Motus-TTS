@@ -1,26 +1,17 @@
 #!/bin/bash
 # Single task evaluation script for Motus policy on RoboTwin platform
+# impl and exp of tts and opd
 
 # ============================================================================
 # Single Task Configuration - MODIFY THESE
 # ============================================================================
 
-# 修改，使其能传入指定任务的参数
-# TASK_NAME="click_alarmclock"  # Change this to the task you want to test
-
-# TASK_NAME="${1:-click_alarmclock}"
 
 #tts add
 TASK_NAME="${1:-click_alarmclock}"
 if [ $# -gt 0 ]; then
     shift
 fi
-
-# GPU_ID=0
-# TTS_ENABLE=False
-# TTS_NUM_SAMPLES=8
-# TTS_LOG_ACTIONS=True
-# TTS_SAVE_FULL_ACTIONS=True
 
 # ttsv2 add
 GPU_ID=0
@@ -30,20 +21,23 @@ TTS_ENABLE=False
 TTS_NUM_SAMPLES=8
 
 # Selection method:
-#   global_medoid:  average-L2/global-medoid selection
-#   keystone:       KeyStone-style guard + kmeans + largest-cluster medoid
-#   rank_softmax:   rank-based stochastic selection, P(i)=softmax(-rank_i/tau)
+#   global_medoid:          average-L2/global-medoid selection
+#   keystone:               KeyStone-style guard + kmeans + largest-cluster medoid
+#   rank_softmax:           rank-based stochastic selection, P(i)=softmax(-rank_i/tau)
+#   cluster_rank_softmax:   guard + kmeans largest-cluster + local rank-softmax
 TTS_METHOD="global_medoid"
 
 # KeyStone defaults
 TTS_NUM_CLUSTERS=2
 
-# TTS_TAU=0.3
-
 # tau meaning:
 #   keystone:     unimodality guard threshold, default 0.3
 #   rank_softmax: rank-softmax temperature, recommended 1.0
 TTS_TAU=0.3
+
+# Rank-softmax temperature for cluster_rank_softmax.
+# Keep this separate from TTS_TAU, which is used as the unimodality guard.
+TTS_RANK_TAU=1.0
 
 TTS_KMEANS_ITERS=10
 
@@ -85,6 +79,10 @@ while [[ $# -gt 0 ]]; do
             TTS_TAU="$2"
             shift 2
             ;;
+        --tts-rank-tau)
+            TTS_RANK_TAU="$2"
+            shift 2
+            ;;        
         --tts-kmeans-iters)
             TTS_KMEANS_ITERS="$2"
             shift 2
@@ -263,6 +261,7 @@ echo "TTS Num Samples:   $TTS_NUM_SAMPLES"
 echo "TTS Method:        $TTS_METHOD"
 echo "TTS Num Clusters:  $TTS_NUM_CLUSTERS"
 echo "TTS Tau:           $TTS_TAU"
+echo "TTS Rank Tau:      $TTS_RANK_TAU"
 echo "TTS KMeans Iters:  $TTS_KMEANS_ITERS"
 echo "TTS Log Actions:   $TTS_LOG_ACTIONS"
 echo "TTS Save Full:     $TTS_SAVE_FULL_ACTIONS (deprecated; npz disabled)"
@@ -274,20 +273,6 @@ echo "Starting evaluation..."
 
 # 处理环境进入问题
 #############
-
-# PYTHONWARNINGS=ignore::UserWarning \
-# python script/eval_policy.py \
-#     --config "policy/${POLICY_NAME}/deploy_policy.yml" \
-#     --overrides \
-#     --task_name "${TASK_NAME}" \
-#     --task_config "${TASK_CONFIG}" \
-#     --ckpt_setting "${ckpt_setting}" \
-#     --seed "${SEED}" \
-#     --policy_name "${POLICY_NAME}" \
-#     --log_dir "${LOG_DIR}" \
-#     --wan_path "${WAN_PATH}" \
-#     --vlm_path "${VLM_PATH}" \
-#     2>&1 | tee "$log_file"
 
 echo "Python executable: ${CONDA_ENV}/bin/python"
 "${CONDA_ENV}/bin/python" - <<'PY'
@@ -317,6 +302,7 @@ PYTHONWARNINGS=ignore::UserWarning \
     --tts_method "${TTS_METHOD}" \
     --tts_num_clusters "${TTS_NUM_CLUSTERS}" \
     --tts_tau "${TTS_TAU}" \
+    --tts_rank_tau "${TTS_RANK_TAU}" \
     --tts_kmeans_iters "${TTS_KMEANS_ITERS}" \
     --tts_log_actions "${TTS_LOG_ACTIONS}" \
     --tts_save_full_actions "${TTS_SAVE_FULL_ACTIONS}" \
