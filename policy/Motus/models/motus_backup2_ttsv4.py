@@ -885,9 +885,7 @@ class Motus(nn.Module):
         language_embeddings: Optional[List[torch.Tensor]] = None,
         vlm_inputs: Optional[List] = None,
         decode_video: bool = True,
-        return_video_feature: bool = False,
-        video_feature_type: str = "latent",
-    ) -> Tuple[torch.Tensor, ...]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Joint inference for video and action prediction.
         
@@ -899,14 +897,8 @@ class Motus(nn.Module):
             num_inference_steps: Number of denoising steps
             language_embeddings: Pre-encoded T5 embeddings for WAN model
             
-        return_video_feature: If True, also return a pooled video feature for TTS selection.
-            The default False preserves the original two-value return signature.
-        video_feature_type: "latent" uses final denoised future video latent;
-            "token"/"tokens" uses pooled final WAN video tokens.
-
         Returns:
-            Tuple of (predicted_frames, predicted_actions) when return_video_feature=False.
-            Tuple of (predicted_frames, predicted_actions, video_feature) when return_video_feature=True.
+            Tuple of (predicted_frames, predicted_actions)
         """
 
         B = first_frame.shape[0]
@@ -1015,29 +1007,7 @@ class Motus(nn.Module):
                 # Teacher Forcing
                 video_latent[:, :, 0:1] = condition_frame_latent
     
-        # 4. Optional pooled video feature for video-informed TTS.
-        # This does not require RGB video decoding. For latent features, we skip
-        # latent frame 0 because it is the teacher-forced condition frame.
-        video_feature = None
-        if return_video_feature:
-            feature_type = str(video_feature_type).strip().lower()
-            if feature_type == "latent":
-                future_video_latent = video_latent[:, :, 1:, :, :]
-                if future_video_latent.shape[2] == 0:
-                    # Defensive fallback for unusual configs with no future latent frames.
-                    future_video_latent = video_latent
-                video_feature = future_video_latent.float().mean(dim=(-1, -2)).flatten(1)
-            elif feature_type in ["token", "tokens"]:
-                # video_tokens is the final-step, final-layer WAN token representation
-                # after trimodal MoT interactions with action and understanding tokens.
-                video_feature = video_tokens.float().mean(dim=1)
-            else:
-                raise ValueError(
-                    f"Unknown video_feature_type={video_feature_type}. "
-                    "Allowed values: latent, token, tokens"
-                )
-
-        # 5. Decode outputs
+        # 4. Decode outputs
         predicted_frames = None
         if decode_video:
             with torch.no_grad():
@@ -1047,9 +1017,6 @@ class Motus(nn.Module):
             predicted_frames = torch.clamp(predicted_frames, 0, 1).float()
 
         predicted_actions = action_latent.float()  # [B, action_chunk_size, 14]
-
-        if return_video_feature:
-            return predicted_frames, predicted_actions, video_feature
 
         return predicted_frames, predicted_actions
 

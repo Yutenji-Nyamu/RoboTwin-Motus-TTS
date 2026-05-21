@@ -25,7 +25,6 @@ TTS_NUM_SAMPLES=8
 #   keystone:               KeyStone-style guard + kmeans + largest-cluster medoid
 #   rank_softmax:           rank-based stochastic selection, P(i)=softmax(-rank_i/tau)
 #   cluster_rank_softmax:   guard + kmeans largest-cluster + local rank-softmax
-#   video_rank_fusion:      action/video-latent rank-level late fusion
 TTS_METHOD="global_medoid"
 
 # KeyStone defaults
@@ -56,16 +55,6 @@ TTS_LOG_ACTIONS=True
 # Deprecated/no-op in the new Python implementation.
 # 保留这个参数只是为了兼容旧命令；新版本不再保存 .npz。
 TTS_SAVE_FULL_ACTIONS=False
-
-# Video-informed TTS rank fusion.
-# Used when --tts-method video_rank_fusion.
-# final video latent does NOT require --tts-decode-video.
-TTS_VIDEO_ENABLE=False
-TTS_VIDEO_FEATURE="latent"
-# Rank fusion method: borda | weighted_borda | rrf
-TTS_RANK_FUSION_METHOD="rrf"
-TTS_VIDEO_WEIGHT=0.5
-TTS_RRF_K=1
 # ttsv2 add end
 
 while [[ $# -gt 0 ]]; do
@@ -101,7 +90,7 @@ while [[ $# -gt 0 ]]; do
         --tts-rank-tau)
             TTS_RANK_TAU="$2"
             shift 2
-            ;;
+            ;;      
         --tts-batch-size)
             TTS_BATCH_SIZE="$2"
             shift 2
@@ -113,11 +102,11 @@ while [[ $# -gt 0 ]]; do
         --no-tts-decode-video)
             TTS_DECODE_VIDEO=False
             shift
-            ;;
+            ;;  
         --tts-kmeans-iters)
             TTS_KMEANS_ITERS="$2"
             shift 2
-            ;;
+            ;;            
         --tts-log-actions)
             TTS_LOG_ACTIONS="$2"
             shift 2
@@ -126,41 +115,12 @@ while [[ $# -gt 0 ]]; do
             TTS_SAVE_FULL_ACTIONS="$2"
             shift 2
             ;;
-        --tts-video)
-            TTS_VIDEO_ENABLE=True
-            shift
-            ;;
-        --no-tts-video)
-            TTS_VIDEO_ENABLE=False
-            shift
-            ;;
-        --tts-video-feature)
-            TTS_VIDEO_FEATURE="$2"
-            shift 2
-            ;;
-        --tts-rank-fusion-method)
-            TTS_RANK_FUSION_METHOD="$2"
-            shift 2
-            ;;
-        --tts-video-weight)
-            TTS_VIDEO_WEIGHT="$2"
-            shift 2
-            ;;
-        --tts-rrf-k)
-            TTS_RRF_K="$2"
-            shift 2
-            ;;
         *)
             echo "Unknown argument: $1"
             exit 1
             ;;
     esac
 done
-
-# If the selector is the video-informed rank fusion method, enable video features automatically.
-if [ "$TTS_METHOD" = "video_rank_fusion" ]; then
-    TTS_VIDEO_ENABLE=True
-fi
 
 # GPU_ID=0                       # GPU to use
 
@@ -323,11 +283,6 @@ echo "TTS Decode Video:  $TTS_DECODE_VIDEO"
 echo "TTS KMeans Iters:  $TTS_KMEANS_ITERS"
 echo "TTS Log Actions:   $TTS_LOG_ACTIONS"
 echo "TTS Save Full:     $TTS_SAVE_FULL_ACTIONS (deprecated; npz disabled)"
-echo "TTS Video Enable:  $TTS_VIDEO_ENABLE"
-echo "TTS Video Feature: $TTS_VIDEO_FEATURE"
-echo "TTS Rank Fusion:   $TTS_RANK_FUSION_METHOD"
-echo "TTS Video Weight:  $TTS_VIDEO_WEIGHT"
-echo "TTS RRF K:         $TTS_RRF_K"
 echo "================================================================"
 echo ""
 
@@ -371,11 +326,6 @@ PYTHONWARNINGS=ignore::UserWarning \
     --tts_kmeans_iters "${TTS_KMEANS_ITERS}" \
     --tts_log_actions "${TTS_LOG_ACTIONS}" \
     --tts_save_full_actions "${TTS_SAVE_FULL_ACTIONS}" \
-    --tts_video_enable "${TTS_VIDEO_ENABLE}" \
-    --tts_video_feature "${TTS_VIDEO_FEATURE}" \
-    --tts_rank_fusion_method "${TTS_RANK_FUSION_METHOD}" \
-    --tts_video_weight "${TTS_VIDEO_WEIGHT}" \
-    --tts_rrf_k "${TTS_RRF_K}" \
     2>&1 | tee "$log_file"
 
 #############

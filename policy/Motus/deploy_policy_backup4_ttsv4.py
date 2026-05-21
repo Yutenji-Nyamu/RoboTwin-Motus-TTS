@@ -48,7 +48,6 @@ DEFAULT_TTS_NUM_SAMPLES = 8
 #   keystone:               unimodality guard + kmeans + largest-cluster medoid
 #   rank_softmax:           rank-based stochastic selection, P(i)=softmax(-rank_i/tau)
 #   cluster_rank_softmax:   unimodality guard + kmeans largest-cluster + local rank-softmax
-#   video_rank_fusion:      action-rank + video-feature-rank late fusion
 DEFAULT_TTS_METHOD = "global_medoid"
 
 # TTS defaults
@@ -80,14 +79,6 @@ DEFAULT_TTS_LOG_ACTIONS = True
 # Deprecated/no-op: kept only for backward compatibility with old scripts.
 # New implementation does not save .npz files.
 DEFAULT_TTS_SAVE_FULL_ACTIONS = False
-
-# Video-informed TTS rank fusion defaults.
-# These are used by tts_method="video_rank_fusion".
-DEFAULT_TTS_VIDEO_ENABLE = False
-DEFAULT_TTS_VIDEO_FEATURE = "latent"          # latent | token | tokens
-DEFAULT_TTS_RANK_FUSION_METHOD = "rrf"       # borda | weighted_borda | rrf
-DEFAULT_TTS_VIDEO_WEIGHT = 0.5                # video rank weight; action weight is 1.0
-DEFAULT_TTS_RRF_K = 1.0                       # small K candidate set; do not use IR default 60 blindly
 
 # tts add
 def _as_bool(x):
@@ -122,12 +113,7 @@ class MotusPolicy:
         tts_decode_video: bool = DEFAULT_TTS_DECODE_VIDEO,
         tts_kmeans_iters: int = DEFAULT_TTS_KMEANS_ITERS,
         tts_log_actions: bool = DEFAULT_TTS_LOG_ACTIONS,
-        tts_save_full_actions: bool = DEFAULT_TTS_SAVE_FULL_ACTIONS,
-        tts_video_enable: bool = DEFAULT_TTS_VIDEO_ENABLE,
-        tts_video_feature: str = DEFAULT_TTS_VIDEO_FEATURE,
-        tts_rank_fusion_method: str = DEFAULT_TTS_RANK_FUSION_METHOD,
-        tts_video_weight: float = DEFAULT_TTS_VIDEO_WEIGHT,
-        tts_rrf_k: float = DEFAULT_TTS_RRF_K,
+        tts_save_full_actions: bool = DEFAULT_TTS_SAVE_FULL_ACTIONS,             
     ):
         self.device = device
         self.checkpoint_path = checkpoint_path
@@ -191,7 +177,6 @@ class MotusPolicy:
             "keystone",
             "rank_softmax",
             "cluster_rank_softmax",
-            "video_rank_fusion",
         }
         
         if self.tts_method not in allowed_tts_methods:
@@ -211,28 +196,6 @@ class MotusPolicy:
 
         # Deprecated/no-op. Kept so old command lines still parse.
         self.tts_save_full_actions = _as_bool(tts_save_full_actions)
-
-        # Video-informed rank-level fusion. If the selected method is video_rank_fusion,
-        # enable video feature extraction even if the explicit flag was omitted.
-        self.tts_video_enable = _as_bool(tts_video_enable) or (self.tts_method == "video_rank_fusion")
-        self.tts_video_feature = str(tts_video_feature).strip().lower()
-        allowed_video_features = {"latent", "token", "tokens"}
-        if self.tts_video_feature not in allowed_video_features:
-            raise ValueError(
-                f"Unknown tts_video_feature={self.tts_video_feature}. "
-                f"Allowed values: {sorted(allowed_video_features)}"
-            )
-
-        self.tts_rank_fusion_method = str(tts_rank_fusion_method).strip().lower()
-        allowed_rank_fusion_methods = {"borda", "weighted_borda", "rrf"}
-        if self.tts_rank_fusion_method not in allowed_rank_fusion_methods:
-            raise ValueError(
-                f"Unknown tts_rank_fusion_method={self.tts_rank_fusion_method}. "
-                f"Allowed values: {sorted(allowed_rank_fusion_methods)}"
-            )
-
-        self.tts_video_weight = float(tts_video_weight)
-        self.tts_rrf_k = max(0.0, float(tts_rrf_k))
 
         self.tts_dir = self.log_dir / "tts" / task_dir_name
 
@@ -254,11 +217,6 @@ class MotusPolicy:
             f"kmeans_iters={self.tts_kmeans_iters}, "
             f"log_actions={self.tts_log_actions}, "
             f"save_full_actions={self.tts_save_full_actions} (deprecated/no-op), "
-            f"video_enable={self.tts_video_enable}, "
-            f"video_feature={self.tts_video_feature}, "
-            f"rank_fusion_method={self.tts_rank_fusion_method}, "
-            f"video_weight={self.tts_video_weight}, "
-            f"rrf_k={self.tts_rrf_k}, "
             f"tts_dir={self.tts_dir}"
         )
 
@@ -405,21 +363,17 @@ class MotusPolicy:
         vlm_inputs,
         num_inference_steps,
         decode_video=True,
-        return_video_feature=False,
-        video_feature_type="latent",
     ):
         with torch.no_grad():
-            out = self.model.inference_step(
+            predicted_frames, predicted_actions = self.model.inference_step(
                 first_frame=current_frame,
                 state=self.current_state,
                 num_inference_steps=num_inference_steps,
                 language_embeddings=t5_list,
                 vlm_inputs=[vlm_inputs],
                 decode_video=decode_video,
-                return_video_feature=return_video_feature,
-                video_feature_type=video_feature_type,
             )
-        return out
+        return predicted_frames, predicted_actions
 
     # tts acceleration add
     def _run_batched_inference(
@@ -430,8 +384,6 @@ class MotusPolicy:
         num_inference_steps,
         batch_size,
         decode_video=False,
-        return_video_feature=False,
-        video_feature_type="latent",
     ):
         current_frame_b = current_frame.repeat(batch_size, 1, 1, 1)
         state_b = self.current_state.repeat(batch_size, 1)
@@ -443,31 +395,28 @@ class MotusPolicy:
         vlm_inputs_b = [vlm_inputs for _ in range(batch_size)]
 
         with torch.no_grad():
-            out = self.model.inference_step(
+            predicted_frames, predicted_actions = self.model.inference_step(
                 first_frame=current_frame_b,
                 state=state_b,
                 num_inference_steps=num_inference_steps,
                 language_embeddings=t5_list_b,
                 vlm_inputs=vlm_inputs_b,
                 decode_video=decode_video,
-                return_video_feature=return_video_feature,
-                video_feature_type=video_feature_type,
             )
-        return out
+        return predicted_frames, predicted_actions
     
     # tts v2 add
-    def _select_tts_action(self, actions_stack: torch.Tensor, video_features_stack: Optional[torch.Tensor] = None):
+    def _select_tts_action(self, actions_stack: torch.Tensor):
         """
         Dispatch TTS selector according to self.tts_method.
 
         actions_stack: [K, H, D], CPU tensor.
-        video_features_stack: optional [K, F...] CPU tensor for video_rank_fusion.
         """
         if self.tts_method == "global_medoid":
             return self._select_tts_global_medoid(actions_stack)
 
         if self.tts_method == "keystone":
-            return self._select_tts_keystone(actions_stack)
+            return self._select_tts_keystone(actions_stack)  
         
         if self.tts_method == "rank_softmax":
             return self._select_tts_rank_softmax(actions_stack)
@@ -475,12 +424,7 @@ class MotusPolicy:
         if self.tts_method == "cluster_rank_softmax":
             return self._select_tts_cluster_rank_softmax(actions_stack)
 
-        if self.tts_method == "video_rank_fusion":
-            if video_features_stack is None:
-                raise ValueError("video_rank_fusion requires video_features_stack")
-            return self._select_tts_video_rank_fusion(actions_stack, video_features_stack)
-
-        raise ValueError(f"Unknown tts_method={self.tts_method}")
+        raise ValueError(f"Unknown tts_method={self.tts_method}")    
 
     # ttsv2 add
     def _build_tts_ranks(self, avg_l2: torch.Tensor):
@@ -496,50 +440,6 @@ class MotusPolicy:
         ranks = torch.empty_like(order)
         ranks[order] = torch.arange(len(avg_l2), dtype=order.dtype, device=avg_l2.device)
         return ranks, order
-
-    def _compute_pairwise_avg_l2_and_ranks(self, x: torch.Tensor):
-        """
-        Flatten candidate features, compute pairwise L2, average-L2 scores, and ranks.
-
-        x: [K, ...] CPU/GPU tensor. Lower avg_l2 means more consensus-like.
-        return: flat_x, pairwise_l2, avg_l2, ranks, order
-        """
-        k = x.shape[0]
-        flat_x = x.reshape(k, -1).float()
-        pairwise_l2 = torch.cdist(flat_x, flat_x, p=2)
-
-        if k <= 1:
-            avg_l2 = torch.zeros(k, dtype=pairwise_l2.dtype, device=pairwise_l2.device)
-        else:
-            avg_l2 = pairwise_l2.sum(dim=1) / (k - 1)
-
-        ranks, order = self._build_tts_ranks(avg_l2)
-        return flat_x, pairwise_l2, avg_l2, ranks, order
-
-    def _upper_tri_median(self, pairwise_l2: torch.Tensor) -> float:
-        """Median off-diagonal pairwise distance for scale diagnostics."""
-        k = pairwise_l2.shape[0]
-        if k <= 1:
-            return 0.0
-        iu = torch.triu_indices(k, k, offset=1, device=pairwise_l2.device)
-        return float(pairwise_l2[iu[0], iu[1]].median().item())
-
-    def _spearman_from_ranks(self, ranks_a: torch.Tensor, ranks_b: torch.Tensor) -> str:
-        """Return Spearman rank correlation as a string; empty if undefined."""
-        if ranks_a.numel() <= 1:
-            return ""
-        a = ranks_a.to(torch.float32)
-        b = ranks_b.to(torch.float32)
-        a = a - a.mean()
-        b = b - b.mean()
-        denom = torch.norm(a) * torch.norm(b)
-        if float(denom.item()) <= 1e-12:
-            return ""
-        return f"{float((a @ b / denom).item()):.8f}"
-
-    def _format_float_list(self, x: torch.Tensor, precision: int = 8) -> str:
-        fmt = f"{{:.{precision}f}}"
-        return "|".join(fmt.format(float(v)) for v in x.detach().cpu().tolist())
 
     # tts add
     def _select_tts_global_medoid(self, actions_stack: torch.Tensor):
@@ -777,159 +677,6 @@ class MotusPolicy:
 
         return selected_idx, pairwise_l2, avg_l2, metrics
 
-    def _select_tts_video_rank_fusion(
-        self,
-        actions_stack: torch.Tensor,
-        video_features_stack: torch.Tensor,
-    ):
-        """
-        Video-informed rank-level late fusion selector.
-
-        Each TTS candidate is treated as a joint hypothesis (A_i, V_i):
-          - A_i: action chunk, shape [H, D]
-          - V_i: pooled video feature, currently final video latent by default
-
-        The selector computes independent consensus ranks in action space and
-        video-feature space, then fuses the ranks by Borda, weighted Borda, or RRF.
-        This avoids raw L2 scale/feature-dimensionality domination across modalities.
-        """
-        if actions_stack.shape[0] != video_features_stack.shape[0]:
-            raise ValueError(
-                "actions_stack and video_features_stack must have the same number of candidates: "
-                f"got {actions_stack.shape[0]} and {video_features_stack.shape[0]}"
-            )
-
-        k = actions_stack.shape[0]
-
-        flat_actions, action_pairwise_l2, action_avg_l2, action_ranks, action_order = \
-            self._compute_pairwise_avg_l2_and_ranks(actions_stack)
-        flat_video, video_pairwise_l2, video_avg_l2, video_ranks, video_order = \
-            self._compute_pairwise_avg_l2_and_ranks(video_features_stack)
-
-        action_best_idx = int(action_order[0].item()) if k > 0 else 0
-        video_best_idx = int(video_order[0].item()) if k > 0 else 0
-
-        action_ranks_f = action_ranks.to(torch.float32)
-        video_ranks_f = video_ranks.to(torch.float32)
-
-        method = self.tts_rank_fusion_method
-        if method == "borda":
-            # Lower is better. Equal weight rank-sum baseline.
-            fused_scores = action_ranks_f + video_ranks_f
-            selected_idx = int(torch.argmin(fused_scores).item())
-            fused_order = torch.argsort(fused_scores, descending=False)
-            fused_score_direction = "lower_is_better"
-            selected_fused_score = float(fused_scores[selected_idx].item())
-        elif method == "weighted_borda":
-            # Lower is better. Action weight is fixed at 1.0; video is configurable.
-            fused_scores = action_ranks_f + float(self.tts_video_weight) * video_ranks_f
-            selected_idx = int(torch.argmin(fused_scores).item())
-            fused_order = torch.argsort(fused_scores, descending=False)
-            fused_score_direction = "lower_is_better"
-            selected_fused_score = float(fused_scores[selected_idx].item())
-        elif method == "rrf":
-            # Higher is better. Use small rrf_k for small TTS candidate sets (e.g., K=8/16/32).
-            denom_action = float(self.tts_rrf_k) + action_ranks_f + 1.0
-            denom_video = float(self.tts_rrf_k) + video_ranks_f + 1.0
-            fused_scores = (1.0 / denom_action) + (float(self.tts_video_weight) / denom_video)
-            selected_idx = int(torch.argmax(fused_scores).item())
-            fused_order = torch.argsort(fused_scores, descending=True)
-            fused_score_direction = "higher_is_better"
-            selected_fused_score = float(fused_scores[selected_idx].item())
-        else:
-            raise ValueError(
-                f"Unknown tts_rank_fusion_method={method}. "
-                "Allowed values: borda, weighted_borda, rrf"
-            )
-
-        fused_ranks = torch.empty_like(fused_order)
-        fused_ranks[fused_order] = torch.arange(k, dtype=fused_order.dtype, device=fused_order.device)
-
-        selection_probs = torch.zeros(k, dtype=torch.float32, device=action_avg_l2.device)
-        selection_probs[selected_idx] = 1.0
-
-        action_median = self._upper_tri_median(action_pairwise_l2)
-        video_median = self._upper_tri_median(video_pairwise_l2)
-        if action_median > 1e-12:
-            video_action_median_ratio = video_median / action_median
-        else:
-            video_action_median_ratio = float("inf") if video_median > 0 else 0.0
-
-        metrics = {
-            "tts_method": "video_rank_fusion",
-            "selection_stage": f"video_{self.tts_video_feature}_{method}",
-            "rank_fusion_method": method,
-            "video_feature_type": self.tts_video_feature,
-            "video_weight": f"{float(self.tts_video_weight):.8f}",
-            "rrf_k": f"{float(self.tts_rrf_k):.8f}",
-
-            # Keep legacy fields meaningful: global_medoid_idx/avg_l2 refer to action space.
-            "global_medoid_idx": action_best_idx,
-            "unimodal": "",
-            "s_score": "",
-            "num_clusters": 1,
-            "selected_cluster": -1,
-            "selected_cluster_size": k,
-            "cluster_counts": "",
-            "cluster_ids": "",
-
-            "selected_idx": selected_idx,
-            "selected_rank": int(fused_ranks[selected_idx].item()),
-            "selected_prob": "1.00000000",
-            "rank_temperature": "",
-            "rank_ids": "|".join(map(str, fused_ranks.detach().cpu().tolist())),
-            "selection_probs": self._format_float_list(selection_probs, precision=8),
-
-            # Detailed rank-fusion diagnostics.
-            "selected_fused_rank": int(fused_ranks[selected_idx].item()),
-            "selected_fused_score": f"{selected_fused_score:.8f}",
-            "fused_score_direction": fused_score_direction,
-            "fused_score_higher_is_better": fused_score_direction == "higher_is_better",
-            "fused_scores": self._format_float_list(fused_scores, precision=8),
-
-            "selected_action_rank": int(action_ranks[selected_idx].item()),
-            "selected_video_rank": int(video_ranks[selected_idx].item()),
-            "selected_video_avg_l2": f"{float(video_avg_l2[selected_idx].item()):.8f}",
-            "action_best_idx": action_best_idx,
-            "video_best_idx": video_best_idx,
-            "action_global_medoid_idx": action_best_idx,
-            "video_global_medoid_idx": video_best_idx,
-            "rank_agree": bool(action_best_idx == video_best_idx),
-            "rank_spearman": self._spearman_from_ranks(action_ranks, video_ranks),
-            "spearman_rank_corr": self._spearman_from_ranks(action_ranks, video_ranks),
-
-            "action_rank_ids": "|".join(map(str, action_ranks.detach().cpu().tolist())),
-            "video_rank_ids": "|".join(map(str, video_ranks.detach().cpu().tolist())),
-            "action_avg_l2": self._format_float_list(action_avg_l2, precision=6),
-            "video_avg_l2": self._format_float_list(video_avg_l2, precision=6),
-
-            "action_avg_l2_min": f"{float(action_avg_l2.min().item()):.8f}",
-            "action_avg_l2_max": f"{float(action_avg_l2.max().item()):.8f}",
-            "action_avg_l2_mean": f"{float(action_avg_l2.mean().item()):.8f}",
-            "action_avg_l2_std": f"{float(action_avg_l2.std(unbiased=False).item()):.8f}",
-            "video_avg_l2_min": f"{float(video_avg_l2.min().item()):.8f}",
-            "video_avg_l2_max": f"{float(video_avg_l2.max().item()):.8f}",
-            "video_avg_l2_mean": f"{float(video_avg_l2.mean().item()):.8f}",
-            "video_avg_l2_std": f"{float(video_avg_l2.std(unbiased=False).item()):.8f}",
-            "video_min_avg_l2": f"{float(video_avg_l2.min().item()):.8f}",
-            "video_max_avg_l2": f"{float(video_avg_l2.max().item()):.8f}",
-            "video_mean_avg_l2": f"{float(video_avg_l2.mean().item()):.8f}",
-            "video_std_avg_l2": f"{float(video_avg_l2.std(unbiased=False).item()):.8f}",
-            "action_pairwise_median": f"{action_median:.8f}",
-            "video_pairwise_median": f"{video_median:.8f}",
-            "video_action_median_ratio": f"{video_action_median_ratio:.8f}",
-            "distance_ratio_video_over_action": f"{video_action_median_ratio:.8f}",
-            "video_action_distance_ratio": f"{video_action_median_ratio:.8f}",
-            "fused_rank_ids": "|".join(map(str, fused_ranks.detach().cpu().tolist())),
-            "action_feature_dim": flat_actions.shape[1],
-            "video_feature_dim": flat_video.shape[1],
-            "action_feature_norm_mean": f"{float(torch.norm(flat_actions, dim=1).mean().item()):.8f}",
-            "video_feature_norm_mean": f"{float(torch.norm(flat_video, dim=1).mean().item()):.8f}",
-        }
-
-        # Return action-space pairwise/avg_l2 as the legacy primary scores.
-        return selected_idx, action_pairwise_l2, action_avg_l2, metrics
-
     # tts add
     def _compute_global_medoid_and_guard(
         self,
@@ -1152,7 +899,6 @@ class MotusPolicy:
         - Fixed CSV schema for all methods.
         - No .npz saving.
         - Unsupported fields for a method are filled with empty string or -1.
-        - video_rank_fusion adds action/video/fused rank diagnostics for scale and agreement inspection.
         """
         if not self.tts_log_actions:
             return
@@ -1172,22 +918,6 @@ class MotusPolicy:
         global_medoid_avg_l2 = ""
         if global_medoid_idx != "":
             global_medoid_avg_l2 = f"{float(avg_l2_np[int(global_medoid_idx)]):.8f}"
-
-        video_msg = ""
-        if metrics.get("tts_method", self.tts_method) == "video_rank_fusion":
-            video_msg = (
-                f" rank_fusion={metrics.get('rank_fusion_method', '')}"
-                f" video_feature={metrics.get('video_feature_type', '')}"
-                f" video_weight={metrics.get('video_weight', '')}"
-                f" rrf_k={metrics.get('rrf_k', '')}"
-                f" action_best={metrics.get('action_best_idx', '')}"
-                f" video_best={metrics.get('video_best_idx', '')}"
-                f" rank_agree={metrics.get('rank_agree', '')}"
-                f" selected_action_rank={metrics.get('selected_action_rank', '')}"
-                f" selected_video_rank={metrics.get('selected_video_rank', '')}"
-                f" spearman={metrics.get('rank_spearman', '')}"
-                f" dist_ratio_v_over_a={metrics.get('distance_ratio_video_over_action', '')}"
-            )
 
         print(
             f"[TTS] episode={self.episode_count} "
@@ -1212,57 +942,86 @@ class MotusPolicy:
             f"global_medoid_avg_l2={global_medoid_avg_l2} "
             f"min_avg_l2={min_avg_l2:.6f} "
             f"max_avg_l2={max_avg_l2:.6f}"
-            f"{video_msg}"
         )
 
         summary_path = self.tts_dir / "summary.csv"
         write_header = not summary_path.exists()
 
-        base_columns = [
-            "episode", "step", "samples", "tts_method", "selection_stage",
-            "selected_idx", "selected_rank", "selected_prob",
-            "global_medoid_idx", "global_medoid_avg_l2",
-            "unimodal", "s_score", "num_clusters", "tau", "kmeans_iters",
-            "selected_cluster", "selected_cluster_size", "cluster_counts", "cluster_ids",
-            "rank_temperature", "rank_ids", "selection_probs",
-            "selected_avg_l2", "min_avg_l2", "max_avg_l2", "mean_avg_l2", "avg_l2",
-        ]
-
-        video_columns = [
-            "rank_fusion_method", "video_feature_type", "action_feature_dim", "video_feature_dim",
-            "video_weight", "rrf_k", "fused_score_direction",
-            "action_best_idx", "video_best_idx", "rank_agree", "rank_spearman",
-            "selected_action_rank", "selected_video_rank", "selected_fused_rank", "selected_fused_score",
-            "action_rank_ids", "video_rank_ids", "fused_rank_ids", "fused_scores",
-            "action_avg_l2_min", "action_avg_l2_max", "action_avg_l2_mean", "action_avg_l2_std",
-            "video_avg_l2_min", "video_avg_l2_max", "video_avg_l2_mean", "video_avg_l2_std",
-            "action_pairwise_median", "video_pairwise_median", "distance_ratio_video_over_action",
-            "action_feature_norm_mean", "video_feature_norm_mean",
-            "action_avg_l2", "video_avg_l2",
-        ]
-
         with open(summary_path, "a", newline="") as f:
             writer = csv.writer(f)
+
             if write_header:
-                writer.writerow(base_columns + video_columns)
+                writer.writerow([
+                    "episode",
+                    "step",
+                    "samples",
+                    "tts_method",
+                    "selection_stage",
 
-            base_values = [
-                self.episode_count, self.step_count, actions_stack.shape[0],
-                metrics.get("tts_method", self.tts_method), metrics.get("selection_stage", ""),
-                selected_idx, metrics.get("selected_rank", ""), metrics.get("selected_prob", ""),
-                global_medoid_idx, global_medoid_avg_l2,
-                metrics.get("unimodal", ""), metrics.get("s_score", ""), metrics.get("num_clusters", self.tts_num_clusters),
-                self.tts_tau, self.tts_kmeans_iters,
-                metrics.get("selected_cluster", ""), metrics.get("selected_cluster_size", ""),
-                metrics.get("cluster_counts", ""), metrics.get("cluster_ids", ""),
-                metrics.get("rank_temperature", ""), metrics.get("rank_ids", ""), metrics.get("selection_probs", ""),
-                f"{selected_avg_l2:.8f}", f"{min_avg_l2:.8f}", f"{max_avg_l2:.8f}",
-                f"{mean_avg_l2:.8f}", avg_list,
-            ]
+                    "selected_idx",
+                    "selected_rank",
+                    "selected_prob",
 
-            video_values = [metrics.get(col, "") for col in video_columns]
-            writer.writerow(base_values + video_values)
+                    "global_medoid_idx",
+                    "global_medoid_avg_l2",
 
+                    "unimodal",
+                    "s_score",
+                    "num_clusters",
+                    "tau",
+                    "kmeans_iters",
+
+                    "selected_cluster",
+                    "selected_cluster_size",
+                    "cluster_counts",
+                    "cluster_ids",
+
+                    "rank_temperature",
+                    "rank_ids",
+                    "selection_probs",
+
+                    "selected_avg_l2",
+                    "min_avg_l2",
+                    "max_avg_l2",
+                    "mean_avg_l2",
+                    "avg_l2",
+                ])
+
+            writer.writerow([
+                self.episode_count,
+                self.step_count,
+                actions_stack.shape[0],
+                metrics.get("tts_method", self.tts_method),
+                metrics.get("selection_stage", ""),
+
+                selected_idx,
+                metrics.get("selected_rank", ""),
+                metrics.get("selected_prob", ""),
+
+                global_medoid_idx,
+                global_medoid_avg_l2,
+
+                metrics.get("unimodal", ""),
+                metrics.get("s_score", ""),
+                metrics.get("num_clusters", self.tts_num_clusters),
+                self.tts_tau,
+                self.tts_kmeans_iters,
+
+                metrics.get("selected_cluster", ""),
+                metrics.get("selected_cluster_size", ""),
+                metrics.get("cluster_counts", ""),
+                metrics.get("cluster_ids", ""),
+
+                metrics.get("rank_temperature", ""),
+                metrics.get("rank_ids", ""),
+                metrics.get("selection_probs", ""),
+
+                f"{selected_avg_l2:.8f}",
+                f"{min_avg_l2:.8f}",
+                f"{max_avg_l2:.8f}",
+                f"{mean_avg_l2:.8f}",
+                avg_list,
+            ])
 
     def get_action(self, instruction: str = None) -> List[np.ndarray]:
         """Get action predictions from the model."""
@@ -1296,36 +1055,24 @@ class MotusPolicy:
         num_inference_steps = self.config_dict['model']['inference']['num_inference_timesteps']
 
         if self.tts_enable and self.tts_num_samples > 1:
-            use_video_rank_fusion = self.tts_method == "video_rank_fusion"
             action_candidates = []
             frame_candidates = []
-            video_feature_candidates = []
 
             remaining = self.tts_num_samples
             while remaining > 0:
                 cur_bs = min(self.tts_batch_size, remaining)
 
-                out = self._run_batched_inference(
+                cand_frames_b, cand_actions_b = self._run_batched_inference(
                     current_frame=current_frame,
                     t5_list=t5_list,
                     vlm_inputs=vlm_inputs,
                     num_inference_steps=num_inference_steps,
                     batch_size=cur_bs,
                     decode_video=self.tts_decode_video,
-                    return_video_feature=use_video_rank_fusion,
-                    video_feature_type=self.tts_video_feature,
                 )
-
-                if use_video_rank_fusion:
-                    cand_frames_b, cand_actions_b, cand_video_features_b = out
-                else:
-                    cand_frames_b, cand_actions_b = out
-                    cand_video_features_b = None
 
                 for local_idx in range(cur_bs):
                     action_candidates.append(cand_actions_b[local_idx].detach().float().cpu())
-                    if use_video_rank_fusion:
-                        video_feature_candidates.append(cand_video_features_b[local_idx].detach().float().cpu())
                     if cand_frames_b is None:
                         frame_candidates.append(None)
                     else:
@@ -1334,14 +1081,7 @@ class MotusPolicy:
                 remaining -= cur_bs
             
             actions_stack = torch.stack(action_candidates, dim=0)
-            if use_video_rank_fusion:
-                video_features_stack = torch.stack(video_feature_candidates, dim=0)
-                selected_idx, pairwise_l2, avg_l2, metrics = self._select_tts_action(
-                    actions_stack,
-                    video_features_stack=video_features_stack,
-                )
-            else:
-                selected_idx, pairwise_l2, avg_l2, metrics = self._select_tts_action(actions_stack)
+            selected_idx, pairwise_l2, avg_l2, metrics = self._select_tts_action(actions_stack)
             self._log_tts_result(actions_stack, pairwise_l2, avg_l2, selected_idx, metrics)
 
             predicted_actions = actions_stack[selected_idx].unsqueeze(0)
@@ -1526,15 +1266,6 @@ def get_model(usr_args):
     tts_save_full_actions = _as_bool(
         usr_args.get("tts_save_full_actions", DEFAULT_TTS_SAVE_FULL_ACTIONS)
     )
-
-    # Video-informed rank-fusion TTS args.
-    tts_video_enable = _as_bool(usr_args.get("tts_video_enable", DEFAULT_TTS_VIDEO_ENABLE))
-    tts_video_feature = str(usr_args.get("tts_video_feature", DEFAULT_TTS_VIDEO_FEATURE))
-    tts_rank_fusion_method = str(
-        usr_args.get("tts_rank_fusion_method", DEFAULT_TTS_RANK_FUSION_METHOD)
-    )
-    tts_video_weight = float(usr_args.get("tts_video_weight", DEFAULT_TTS_VIDEO_WEIGHT))
-    tts_rrf_k = float(usr_args.get("tts_rrf_k", DEFAULT_TTS_RRF_K))
     
     policy = MotusPolicy(
         checkpoint_path=checkpoint_path,
@@ -1555,11 +1286,6 @@ def get_model(usr_args):
         tts_kmeans_iters=tts_kmeans_iters,
         tts_log_actions=tts_log_actions,
         tts_save_full_actions=tts_save_full_actions,
-        tts_video_enable=tts_video_enable,
-        tts_video_feature=tts_video_feature,
-        tts_rank_fusion_method=tts_rank_fusion_method,
-        tts_video_weight=tts_video_weight,
-        tts_rrf_k=tts_rrf_k,
     )
     
     return policy
