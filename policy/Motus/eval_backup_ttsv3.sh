@@ -39,14 +39,6 @@ TTS_TAU=0.3
 # Keep this separate from TTS_TAU, which is used as the unimodality guard.
 TTS_RANK_TAU=1.0
 
-# Batched TTS candidate generation.
-# 1 keeps the old sequential behavior.
-TTS_BATCH_SIZE=1
-
-# Whether to decode predicted videos during TTS candidate generation.
-# False is faster and enough for action-only selectors.
-TTS_DECODE_VIDEO=False
-
 TTS_KMEANS_ITERS=10
 
 # Logging
@@ -90,19 +82,7 @@ while [[ $# -gt 0 ]]; do
         --tts-rank-tau)
             TTS_RANK_TAU="$2"
             shift 2
-            ;;      
-        --tts-batch-size)
-            TTS_BATCH_SIZE="$2"
-            shift 2
-            ;;
-        --tts-decode-video)
-            TTS_DECODE_VIDEO=True
-            shift
-            ;;
-        --no-tts-decode-video)
-            TTS_DECODE_VIDEO=False
-            shift
-            ;;  
+            ;;        
         --tts-kmeans-iters)
             TTS_KMEANS_ITERS="$2"
             shift 2
@@ -272,14 +252,16 @@ echo "VLM Path:          $VLM_PATH"
 echo "Task Config:       $TASK_CONFIG"
 echo "Seed:              $SEED"
 echo "Log File:          $log_file"
+# echo "TTS Enable:        $TTS_ENABLE" #tts add
+# echo "TTS Num Samples:   $TTS_NUM_SAMPLES" #tts add
+# echo "TTS Log Actions:   $TTS_LOG_ACTIONS" #tts add
+# echo "TTS Save Full:     $TTS_SAVE_FULL_ACTIONS" #tts add
 echo "TTS Enable:        $TTS_ENABLE"
 echo "TTS Num Samples:   $TTS_NUM_SAMPLES"
 echo "TTS Method:        $TTS_METHOD"
 echo "TTS Num Clusters:  $TTS_NUM_CLUSTERS"
 echo "TTS Tau:           $TTS_TAU"
 echo "TTS Rank Tau:      $TTS_RANK_TAU"
-echo "TTS Batch Size:    $TTS_BATCH_SIZE"
-echo "TTS Decode Video:  $TTS_DECODE_VIDEO"
 echo "TTS KMeans Iters:  $TTS_KMEANS_ITERS"
 echo "TTS Log Actions:   $TTS_LOG_ACTIONS"
 echo "TTS Save Full:     $TTS_SAVE_FULL_ACTIONS (deprecated; npz disabled)"
@@ -321,8 +303,6 @@ PYTHONWARNINGS=ignore::UserWarning \
     --tts_num_clusters "${TTS_NUM_CLUSTERS}" \
     --tts_tau "${TTS_TAU}" \
     --tts_rank_tau "${TTS_RANK_TAU}" \
-    --tts_batch_size "${TTS_BATCH_SIZE}" \
-    --tts_decode_video "${TTS_DECODE_VIDEO}" \
     --tts_kmeans_iters "${TTS_KMEANS_ITERS}" \
     --tts_log_actions "${TTS_LOG_ACTIONS}" \
     --tts_save_full_actions "${TTS_SAVE_FULL_ACTIONS}" \

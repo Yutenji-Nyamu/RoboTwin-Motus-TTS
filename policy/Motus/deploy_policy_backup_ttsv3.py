@@ -64,13 +64,6 @@ DEFAULT_TTS_TAU = 0.3
 # This avoids overloading DEFAULT_TTS_TAU, whose default is tuned as a guard threshold.
 DEFAULT_TTS_RANK_TAU = 1.0
 
-# Batched candidate generation. 1 keeps the old sequential behavior.
-DEFAULT_TTS_BATCH_SIZE = 1
-
-# Decode predicted frames during TTS candidate generation.
-# False is faster and enough for action-only selectors.
-DEFAULT_TTS_DECODE_VIDEO = False
-
 DEFAULT_TTS_KMEANS_ITERS = 10
 
 # Logging
@@ -109,8 +102,6 @@ class MotusPolicy:
         tts_num_clusters: int = DEFAULT_TTS_NUM_CLUSTERS,
         tts_tau: float = DEFAULT_TTS_TAU,
         tts_rank_tau: float = DEFAULT_TTS_RANK_TAU,
-        tts_batch_size: int = DEFAULT_TTS_BATCH_SIZE,
-        tts_decode_video: bool = DEFAULT_TTS_DECODE_VIDEO,
         tts_kmeans_iters: int = DEFAULT_TTS_KMEANS_ITERS,
         tts_log_actions: bool = DEFAULT_TTS_LOG_ACTIONS,
         tts_save_full_actions: bool = DEFAULT_TTS_SAVE_FULL_ACTIONS,             
@@ -188,8 +179,6 @@ class MotusPolicy:
         self.tts_num_clusters = max(1, int(tts_num_clusters))
         self.tts_tau = float(tts_tau)
         self.tts_rank_tau = float(tts_rank_tau)
-        self.tts_batch_size = max(1, int(tts_batch_size))
-        self.tts_decode_video = _as_bool(tts_decode_video)
         self.tts_kmeans_iters = max(1, int(tts_kmeans_iters))
 
         self.tts_log_actions = _as_bool(tts_log_actions)
@@ -212,8 +201,6 @@ class MotusPolicy:
             f"num_clusters={self.tts_num_clusters}, "
             f"tau={self.tts_tau}, "
             f"rank_tau={self.tts_rank_tau}, "
-            f"batch_size={self.tts_batch_size}, "
-            f"decode_video={self.tts_decode_video}, "
             f"kmeans_iters={self.tts_kmeans_iters}, "
             f"log_actions={self.tts_log_actions}, "
             f"save_full_actions={self.tts_save_full_actions} (deprecated/no-op), "
@@ -354,16 +341,9 @@ class MotusPolicy:
 
         self.current_state = state_tensor.to(self.device)
         self.current_state_norm = self._normalize_actions(self.current_state).to(self.device)
-    
+
     # tts add
-    def _run_single_inference(
-        self,
-        current_frame,
-        t5_list,
-        vlm_inputs,
-        num_inference_steps,
-        decode_video=True,
-    ):
+    def _run_single_inference(self, current_frame, t5_list, vlm_inputs, num_inference_steps):
         with torch.no_grad():
             predicted_frames, predicted_actions = self.model.inference_step(
                 first_frame=current_frame,
@@ -371,37 +351,6 @@ class MotusPolicy:
                 num_inference_steps=num_inference_steps,
                 language_embeddings=t5_list,
                 vlm_inputs=[vlm_inputs],
-                decode_video=decode_video,
-            )
-        return predicted_frames, predicted_actions
-
-    # tts acceleration add
-    def _run_batched_inference(
-        self,
-        current_frame,
-        t5_list,
-        vlm_inputs,
-        num_inference_steps,
-        batch_size,
-        decode_video=False,
-    ):
-        current_frame_b = current_frame.repeat(batch_size, 1, 1, 1)
-        state_b = self.current_state.repeat(batch_size, 1)
-
-        # Motus inference_step accepts list-form per-sample language embeddings.
-        t5_list_b = [t5_list[0] for _ in range(batch_size)]
-
-        # Motus VLM path accepts a list of per-sample VLM input dicts and batches them internally.
-        vlm_inputs_b = [vlm_inputs for _ in range(batch_size)]
-
-        with torch.no_grad():
-            predicted_frames, predicted_actions = self.model.inference_step(
-                first_frame=current_frame_b,
-                state=state_b,
-                num_inference_steps=num_inference_steps,
-                language_embeddings=t5_list_b,
-                vlm_inputs=vlm_inputs_b,
-                decode_video=decode_video,
             )
         return predicted_frames, predicted_actions
     
@@ -1058,27 +1007,16 @@ class MotusPolicy:
             action_candidates = []
             frame_candidates = []
 
-            remaining = self.tts_num_samples
-            while remaining > 0:
-                cur_bs = min(self.tts_batch_size, remaining)
-
-                cand_frames_b, cand_actions_b = self._run_batched_inference(
+            for sample_idx in range(self.tts_num_samples):
+                cand_frames, cand_actions = self._run_single_inference(
                     current_frame=current_frame,
                     t5_list=t5_list,
                     vlm_inputs=vlm_inputs,
                     num_inference_steps=num_inference_steps,
-                    batch_size=cur_bs,
-                    decode_video=self.tts_decode_video,
                 )
 
-                for local_idx in range(cur_bs):
-                    action_candidates.append(cand_actions_b[local_idx].detach().float().cpu())
-                    if cand_frames_b is None:
-                        frame_candidates.append(None)
-                    else:
-                        frame_candidates.append(cand_frames_b[local_idx:local_idx + 1].detach().float().cpu())
-
-                remaining -= cur_bs
+                action_candidates.append(cand_actions.squeeze(0).detach().float().cpu())
+                frame_candidates.append(cand_frames.detach().float().cpu() if cand_frames is not None else None)
             
             actions_stack = torch.stack(action_candidates, dim=0)
             selected_idx, pairwise_l2, avg_l2, metrics = self._select_tts_action(actions_stack)
@@ -1092,10 +1030,9 @@ class MotusPolicy:
                 t5_list=t5_list,
                 vlm_inputs=vlm_inputs,
                 num_inference_steps=num_inference_steps,
-                decode_video=True,
             )
         # Run inference end
-        
+
         # Save frame grid
         if predicted_frames is not None:
             if predicted_frames.dim() == 5:
@@ -1103,13 +1040,15 @@ class MotusPolicy:
                     predicted_frames_viz = predicted_frames.permute(0, 2, 1, 3, 4)
                 else:
                     predicted_frames_viz = predicted_frames
-
+                
+                # condition_frame_viz = current_frame.squeeze(0)
+                # predicted_frames_viz = predicted_frames_viz.squeeze(0)
+                
                 condition_frame_viz = current_frame.squeeze(0).detach().cpu()
                 predicted_frames_viz = predicted_frames_viz.squeeze(0).detach().cpu()
-
+                
                 self._save_frame_grid(condition_frame_viz, predicted_frames_viz)
-
-        self.step_count += 1
+                self.step_count += 1
 
         actions_real = predicted_actions.squeeze(0).cpu().numpy()
         self.prev_action = actions_real[-1].copy()
@@ -1256,8 +1195,6 @@ def get_model(usr_args):
     tts_num_clusters = int(usr_args.get("tts_num_clusters", DEFAULT_TTS_NUM_CLUSTERS))
     tts_tau = float(usr_args.get("tts_tau", DEFAULT_TTS_TAU))
     tts_rank_tau = float(usr_args.get("tts_rank_tau", DEFAULT_TTS_RANK_TAU))
-    tts_batch_size = int(usr_args.get("tts_batch_size", DEFAULT_TTS_BATCH_SIZE))
-    tts_decode_video = _as_bool(usr_args.get("tts_decode_video", DEFAULT_TTS_DECODE_VIDEO))
     tts_kmeans_iters = int(usr_args.get("tts_kmeans_iters", DEFAULT_TTS_KMEANS_ITERS))
 
     tts_log_actions = _as_bool(usr_args.get("tts_log_actions", DEFAULT_TTS_LOG_ACTIONS))
@@ -1267,6 +1204,7 @@ def get_model(usr_args):
         usr_args.get("tts_save_full_actions", DEFAULT_TTS_SAVE_FULL_ACTIONS)
     )
     
+    # tts add
     policy = MotusPolicy(
         checkpoint_path=checkpoint_path,
         wan_path=wan_path,
@@ -1281,11 +1219,9 @@ def get_model(usr_args):
         tts_num_clusters=tts_num_clusters,
         tts_tau=tts_tau,
         tts_rank_tau=tts_rank_tau,
-        tts_batch_size=tts_batch_size,
-        tts_decode_video=tts_decode_video,
         tts_kmeans_iters=tts_kmeans_iters,
         tts_log_actions=tts_log_actions,
-        tts_save_full_actions=tts_save_full_actions,
+        tts_save_full_actions=tts_save_full_actions,        
     )
     
     return policy
