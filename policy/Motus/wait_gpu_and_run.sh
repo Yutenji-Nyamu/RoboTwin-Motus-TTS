@@ -5,7 +5,7 @@ set -euo pipefail
 # CONFIG
 # =========================
 GPU_ID="$1"
-THRESHOLD_MB=5
+THRESHOLD_MB=100
 STABLE_SECONDS=10
 CHECK_INTERVAL=1
 

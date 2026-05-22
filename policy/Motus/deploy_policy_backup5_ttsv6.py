@@ -44,14 +44,11 @@ DEFAULT_TTS_ENABLE = False
 DEFAULT_TTS_NUM_SAMPLES = 8
 
 # Methods:
-#   global_medoid:                average-L2/global-medoid selection
-#   keystone:                     unimodality guard + kmeans + largest-cluster medoid
-#   rank_softmax:                 rank-based stochastic selection, P(i)=softmax(-rank_i/tau)
-#   cluster_rank_softmax:         unimodality guard + kmeans largest-cluster + local rank-softmax
-#   video_rank_fusion:            action/video rank-level late fusion
-#   video_cluster_fusion:         action cluster gate + local weighted action/video rank fusion
-#   video_fusion_rank_softmax:    global weighted action/video rank fusion + softmax sampling
-#   video_gated_fusion:           weighted action/video rank fusion with rank-consistency gate
+#   global_medoid:          average-L2/global-medoid selection
+#   keystone:               unimodality guard + kmeans + largest-cluster medoid
+#   rank_softmax:           rank-based stochastic selection, P(i)=softmax(-rank_i/tau)
+#   cluster_rank_softmax:   unimodality guard + kmeans largest-cluster + local rank-softmax
+#   video_rank_fusion:      action-rank + video-feature-rank late fusion
 DEFAULT_TTS_METHOD = "global_medoid"
 
 # TTS defaults
@@ -88,21 +85,9 @@ DEFAULT_TTS_SAVE_FULL_ACTIONS = False
 # These are used by tts_method="video_rank_fusion".
 DEFAULT_TTS_VIDEO_ENABLE = False
 DEFAULT_TTS_VIDEO_FEATURE = "latent"          # latent | token | tokens
-DEFAULT_TTS_RANK_FUSION_METHOD = "weighted_borda"  # borda | weighted_borda | rrf
+DEFAULT_TTS_RANK_FUSION_METHOD = "rrf"       # borda | weighted_borda | rrf
 DEFAULT_TTS_VIDEO_WEIGHT = 0.5                # video rank weight; action weight is 1.0
 DEFAULT_TTS_RRF_K = 1.0                       # small K candidate set; do not use IR default 60 blindly
-
-# Rank-consistency gated video fusion defaults.
-DEFAULT_TTS_VIDEO_WEIGHT_LOW = 0.0
-DEFAULT_TTS_GATE_SPEARMAN_THRESH = 0.3
-DEFAULT_TTS_GATE_DISTANCE_RATIO_THRESH = 2.0
-
-VIDEO_TTS_METHODS = {
-    "video_rank_fusion",
-    "video_cluster_fusion",
-    "video_fusion_rank_softmax",
-    "video_gated_fusion",
-}
 
 # tts add
 def _as_bool(x):
@@ -143,9 +128,6 @@ class MotusPolicy:
         tts_rank_fusion_method: str = DEFAULT_TTS_RANK_FUSION_METHOD,
         tts_video_weight: float = DEFAULT_TTS_VIDEO_WEIGHT,
         tts_rrf_k: float = DEFAULT_TTS_RRF_K,
-        tts_video_weight_low: float = DEFAULT_TTS_VIDEO_WEIGHT_LOW,
-        tts_gate_spearman_thresh: float = DEFAULT_TTS_GATE_SPEARMAN_THRESH,
-        tts_gate_distance_ratio_thresh: float = DEFAULT_TTS_GATE_DISTANCE_RATIO_THRESH,
     ):
         self.device = device
         self.checkpoint_path = checkpoint_path
@@ -209,7 +191,7 @@ class MotusPolicy:
             "keystone",
             "rank_softmax",
             "cluster_rank_softmax",
-            *VIDEO_TTS_METHODS,
+            "video_rank_fusion",
         }
         
         if self.tts_method not in allowed_tts_methods:
@@ -230,9 +212,9 @@ class MotusPolicy:
         # Deprecated/no-op. Kept so old command lines still parse.
         self.tts_save_full_actions = _as_bool(tts_save_full_actions)
 
-        # Video-informed selectors need pooled video features. Enable extraction automatically
-        # for all video TTS methods even if the explicit flag was omitted.
-        self.tts_video_enable = _as_bool(tts_video_enable) or (self.tts_method in VIDEO_TTS_METHODS)
+        # Video-informed rank-level fusion. If the selected method is video_rank_fusion,
+        # enable video feature extraction even if the explicit flag was omitted.
+        self.tts_video_enable = _as_bool(tts_video_enable) or (self.tts_method == "video_rank_fusion")
         self.tts_video_feature = str(tts_video_feature).strip().lower()
         allowed_video_features = {"latent", "token", "tokens"}
         if self.tts_video_feature not in allowed_video_features:
@@ -251,9 +233,6 @@ class MotusPolicy:
 
         self.tts_video_weight = float(tts_video_weight)
         self.tts_rrf_k = max(0.0, float(tts_rrf_k))
-        self.tts_video_weight_low = float(tts_video_weight_low)
-        self.tts_gate_spearman_thresh = float(tts_gate_spearman_thresh)
-        self.tts_gate_distance_ratio_thresh = float(tts_gate_distance_ratio_thresh)
 
         self.tts_dir = self.log_dir / "tts" / task_dir_name
 
@@ -280,9 +259,6 @@ class MotusPolicy:
             f"rank_fusion_method={self.tts_rank_fusion_method}, "
             f"video_weight={self.tts_video_weight}, "
             f"rrf_k={self.tts_rrf_k}, "
-            f"video_weight_low={self.tts_video_weight_low}, "
-            f"gate_spearman_thresh={self.tts_gate_spearman_thresh}, "
-            f"gate_distance_ratio_thresh={self.tts_gate_distance_ratio_thresh}, "
             f"tts_dir={self.tts_dir}"
         )
 
@@ -499,17 +475,10 @@ class MotusPolicy:
         if self.tts_method == "cluster_rank_softmax":
             return self._select_tts_cluster_rank_softmax(actions_stack)
 
-        if self.tts_method in VIDEO_TTS_METHODS:
+        if self.tts_method == "video_rank_fusion":
             if video_features_stack is None:
-                raise ValueError(f"{self.tts_method} requires video_features_stack")
-            if self.tts_method == "video_rank_fusion":
-                return self._select_tts_video_rank_fusion(actions_stack, video_features_stack)
-            if self.tts_method == "video_cluster_fusion":
-                return self._select_tts_video_cluster_fusion(actions_stack, video_features_stack)
-            if self.tts_method == "video_fusion_rank_softmax":
-                return self._select_tts_video_fusion_rank_softmax(actions_stack, video_features_stack)
-            if self.tts_method == "video_gated_fusion":
-                return self._select_tts_video_gated_fusion(actions_stack, video_features_stack)
+                raise ValueError("video_rank_fusion requires video_features_stack")
+            return self._select_tts_video_rank_fusion(actions_stack, video_features_stack)
 
         raise ValueError(f"Unknown tts_method={self.tts_method}")
 
@@ -555,202 +524,22 @@ class MotusPolicy:
         iu = torch.triu_indices(k, k, offset=1, device=pairwise_l2.device)
         return float(pairwise_l2[iu[0], iu[1]].median().item())
 
-    def _spearman_value_from_ranks(self, ranks_a: torch.Tensor, ranks_b: torch.Tensor) -> Optional[float]:
-        """Return Spearman rank correlation as a float; None if undefined."""
+    def _spearman_from_ranks(self, ranks_a: torch.Tensor, ranks_b: torch.Tensor) -> str:
+        """Return Spearman rank correlation as a string; empty if undefined."""
         if ranks_a.numel() <= 1:
-            return None
+            return ""
         a = ranks_a.to(torch.float32)
         b = ranks_b.to(torch.float32)
         a = a - a.mean()
         b = b - b.mean()
         denom = torch.norm(a) * torch.norm(b)
         if float(denom.item()) <= 1e-12:
-            return None
-        return float((a @ b / denom).item())
-
-    def _spearman_from_ranks(self, ranks_a: torch.Tensor, ranks_b: torch.Tensor) -> str:
-        """Return Spearman rank correlation as a string; empty if undefined."""
-        value = self._spearman_value_from_ranks(ranks_a, ranks_b)
-        return "" if value is None else f"{value:.8f}"
+            return ""
+        return f"{float((a @ b / denom).item()):.8f}"
 
     def _format_float_list(self, x: torch.Tensor, precision: int = 8) -> str:
         fmt = f"{{:.{precision}f}}"
         return "|".join(fmt.format(float(v)) for v in x.detach().cpu().tolist())
-
-    def _compute_video_common_tensors(
-        self,
-        actions_stack: torch.Tensor,
-        video_features_stack: torch.Tensor,
-    ):
-        """Compute action/video consensus distances and ranks for video-informed selectors."""
-        if actions_stack.shape[0] != video_features_stack.shape[0]:
-            raise ValueError(
-                "actions_stack and video_features_stack must have the same number of candidates: "
-                f"got {actions_stack.shape[0]} and {video_features_stack.shape[0]}"
-            )
-
-        flat_actions, action_pairwise_l2, action_avg_l2, action_ranks, action_order = \
-            self._compute_pairwise_avg_l2_and_ranks(actions_stack)
-        flat_video, video_pairwise_l2, video_avg_l2, video_ranks, video_order = \
-            self._compute_pairwise_avg_l2_and_ranks(video_features_stack)
-
-        return {
-            "flat_actions": flat_actions,
-            "action_pairwise_l2": action_pairwise_l2,
-            "action_avg_l2": action_avg_l2,
-            "action_ranks": action_ranks,
-            "action_order": action_order,
-            "flat_video": flat_video,
-            "video_pairwise_l2": video_pairwise_l2,
-            "video_avg_l2": video_avg_l2,
-            "video_ranks": video_ranks,
-            "video_order": video_order,
-        }
-
-    def _video_distance_ratio(self, action_pairwise_l2: torch.Tensor, video_pairwise_l2: torch.Tensor):
-        action_median = self._upper_tri_median(action_pairwise_l2)
-        video_median = self._upper_tri_median(video_pairwise_l2)
-        if action_median > 1e-12:
-            ratio = video_median / action_median
-        else:
-            ratio = float("inf") if video_median > 0 else 0.0
-        return action_median, video_median, ratio
-
-    def _build_video_fusion_metrics(
-        self,
-        *,
-        tts_method: str,
-        selection_stage: str,
-        rank_fusion_method: str,
-        selected_idx: int,
-        fused_scores: torch.Tensor,
-        fused_ranks: torch.Tensor,
-        fused_score_direction: str,
-        video_weight: float,
-        common: Dict[str, torch.Tensor],
-        selection_probs: Optional[torch.Tensor] = None,
-        selected_prob: Optional[float] = None,
-        rank_temperature: str = "",
-        num_clusters: int = 1,
-        selected_cluster: int = -1,
-        selected_cluster_size: Optional[int] = None,
-        cluster_counts: str = "",
-        cluster_ids: str = "",
-        unimodal: Any = "",
-        s_score: str = "",
-        extra: Optional[Dict[str, Any]] = None,
-    ):
-        """Build a fixed-schema metrics dict for video-informed TTS selectors."""
-        action_avg_l2 = common["action_avg_l2"]
-        video_avg_l2 = common["video_avg_l2"]
-        action_ranks = common["action_ranks"]
-        video_ranks = common["video_ranks"]
-        action_order = common["action_order"]
-        video_order = common["video_order"]
-        flat_actions = common["flat_actions"]
-        flat_video = common["flat_video"]
-        action_pairwise_l2 = common["action_pairwise_l2"]
-        video_pairwise_l2 = common["video_pairwise_l2"]
-
-        k = int(action_ranks.numel())
-        action_best_idx = int(action_order[0].item()) if k > 0 else 0
-        video_best_idx = int(video_order[0].item()) if k > 0 else 0
-
-        if selection_probs is None:
-            selection_probs = torch.zeros(k, dtype=torch.float32, device=action_avg_l2.device)
-            if k > 0:
-                selection_probs[selected_idx] = 1.0
-        if selected_prob is None:
-            selected_prob = float(selection_probs[selected_idx].item()) if k > 0 else 1.0
-        if selected_cluster_size is None:
-            selected_cluster_size = k
-
-        action_median, video_median, video_action_median_ratio = self._video_distance_ratio(
-            action_pairwise_l2,
-            video_pairwise_l2,
-        )
-        spearman = self._spearman_from_ranks(action_ranks, video_ranks)
-        selected_fused_score = float(fused_scores[selected_idx].item()) if k > 0 else 0.0
-
-        metrics = {
-            "tts_method": tts_method,
-            "selection_stage": selection_stage,
-            "rank_fusion_method": rank_fusion_method,
-            "video_feature_type": self.tts_video_feature,
-            "video_weight": f"{float(video_weight):.8f}",
-            "configured_video_weight": f"{float(self.tts_video_weight):.8f}",
-            "effective_video_weight": f"{float(video_weight):.8f}",
-            "video_weight_low": f"{float(self.tts_video_weight_low):.8f}",
-            "rrf_k": f"{float(self.tts_rrf_k):.8f}",
-            "rank_fusion_scope": "global_all",
-            "fusion_scope": "global_all",
-            "candidate_pool_ids": "",
-            "candidate_pool_size": "",
-
-            "global_medoid_idx": action_best_idx,
-            "unimodal": unimodal,
-            "s_score": s_score,
-            "num_clusters": num_clusters,
-            "selected_cluster": selected_cluster,
-            "selected_cluster_size": selected_cluster_size,
-            "cluster_counts": cluster_counts,
-            "cluster_ids": cluster_ids,
-
-            "selected_idx": selected_idx,
-            "selected_rank": int(fused_ranks[selected_idx].item()) if k > 0 else 0,
-            "selected_prob": f"{float(selected_prob):.8f}",
-            "rank_temperature": rank_temperature,
-            "rank_ids": "|".join(map(str, fused_ranks.detach().cpu().tolist())),
-            "selection_probs": self._format_float_list(selection_probs, precision=8),
-
-            "selected_fused_rank": int(fused_ranks[selected_idx].item()) if k > 0 else 0,
-            "selected_fused_score": f"{selected_fused_score:.8f}",
-            "fused_score_direction": fused_score_direction,
-            "fused_score_higher_is_better": fused_score_direction == "higher_is_better",
-            "fused_scores": self._format_float_list(fused_scores, precision=8),
-            "fused_rank_ids": "|".join(map(str, fused_ranks.detach().cpu().tolist())),
-
-            "selected_action_rank": int(action_ranks[selected_idx].item()) if k > 0 else 0,
-            "selected_video_rank": int(video_ranks[selected_idx].item()) if k > 0 else 0,
-            "selected_video_avg_l2": f"{float(video_avg_l2[selected_idx].item()):.8f}" if k > 0 else "0.00000000",
-            "action_best_idx": action_best_idx,
-            "video_best_idx": video_best_idx,
-            "action_global_medoid_idx": action_best_idx,
-            "video_global_medoid_idx": video_best_idx,
-            "rank_agree": bool(action_best_idx == video_best_idx),
-            "rank_spearman": spearman,
-            "spearman_rank_corr": spearman,
-
-            "action_rank_ids": "|".join(map(str, action_ranks.detach().cpu().tolist())),
-            "video_rank_ids": "|".join(map(str, video_ranks.detach().cpu().tolist())),
-            "action_avg_l2": self._format_float_list(action_avg_l2, precision=6),
-            "video_avg_l2": self._format_float_list(video_avg_l2, precision=6),
-
-            "action_avg_l2_min": f"{float(action_avg_l2.min().item()):.8f}",
-            "action_avg_l2_max": f"{float(action_avg_l2.max().item()):.8f}",
-            "action_avg_l2_mean": f"{float(action_avg_l2.mean().item()):.8f}",
-            "action_avg_l2_std": f"{float(action_avg_l2.std(unbiased=False).item()):.8f}",
-            "video_avg_l2_min": f"{float(video_avg_l2.min().item()):.8f}",
-            "video_avg_l2_max": f"{float(video_avg_l2.max().item()):.8f}",
-            "video_avg_l2_mean": f"{float(video_avg_l2.mean().item()):.8f}",
-            "video_avg_l2_std": f"{float(video_avg_l2.std(unbiased=False).item()):.8f}",
-            "video_min_avg_l2": f"{float(video_avg_l2.min().item()):.8f}",
-            "video_max_avg_l2": f"{float(video_avg_l2.max().item()):.8f}",
-            "video_mean_avg_l2": f"{float(video_avg_l2.mean().item()):.8f}",
-            "video_std_avg_l2": f"{float(video_avg_l2.std(unbiased=False).item()):.8f}",
-            "action_pairwise_median": f"{action_median:.8f}",
-            "video_pairwise_median": f"{video_median:.8f}",
-            "video_action_median_ratio": f"{video_action_median_ratio:.8f}",
-            "distance_ratio_video_over_action": f"{video_action_median_ratio:.8f}",
-            "video_action_distance_ratio": f"{video_action_median_ratio:.8f}",
-            "action_feature_dim": flat_actions.shape[1],
-            "video_feature_dim": flat_video.shape[1],
-            "action_feature_norm_mean": f"{float(torch.norm(flat_actions, dim=1).mean().item()):.8f}",
-            "video_feature_norm_mean": f"{float(torch.norm(flat_video, dim=1).mean().item()):.8f}",
-        }
-        if extra:
-            metrics.update(extra)
-        return metrics
 
     # tts add
     def _select_tts_global_medoid(self, actions_stack: torch.Tensor):
@@ -993,33 +782,60 @@ class MotusPolicy:
         actions_stack: torch.Tensor,
         video_features_stack: torch.Tensor,
     ):
-        """Action/video rank-level late fusion by Borda, weighted Borda, or RRF."""
-        common = self._compute_video_common_tensors(actions_stack, video_features_stack)
+        """
+        Video-informed rank-level late fusion selector.
+
+        Each TTS candidate is treated as a joint hypothesis (A_i, V_i):
+          - A_i: action chunk, shape [H, D]
+          - V_i: pooled video feature, currently final video latent by default
+
+        The selector computes independent consensus ranks in action space and
+        video-feature space, then fuses the ranks by Borda, weighted Borda, or RRF.
+        This avoids raw L2 scale/feature-dimensionality domination across modalities.
+        """
+        if actions_stack.shape[0] != video_features_stack.shape[0]:
+            raise ValueError(
+                "actions_stack and video_features_stack must have the same number of candidates: "
+                f"got {actions_stack.shape[0]} and {video_features_stack.shape[0]}"
+            )
+
         k = actions_stack.shape[0]
-        action_ranks_f = common["action_ranks"].to(torch.float32)
-        video_ranks_f = common["video_ranks"].to(torch.float32)
+
+        flat_actions, action_pairwise_l2, action_avg_l2, action_ranks, action_order = \
+            self._compute_pairwise_avg_l2_and_ranks(actions_stack)
+        flat_video, video_pairwise_l2, video_avg_l2, video_ranks, video_order = \
+            self._compute_pairwise_avg_l2_and_ranks(video_features_stack)
+
+        action_best_idx = int(action_order[0].item()) if k > 0 else 0
+        video_best_idx = int(video_order[0].item()) if k > 0 else 0
+
+        action_ranks_f = action_ranks.to(torch.float32)
+        video_ranks_f = video_ranks.to(torch.float32)
 
         method = self.tts_rank_fusion_method
         if method == "borda":
+            # Lower is better. Equal weight rank-sum baseline.
             fused_scores = action_ranks_f + video_ranks_f
-            fused_score_direction = "lower_is_better"
-            fused_order = torch.argsort(fused_scores, descending=False)
             selected_idx = int(torch.argmin(fused_scores).item())
-            effective_weight = 1.0
+            fused_order = torch.argsort(fused_scores, descending=False)
+            fused_score_direction = "lower_is_better"
+            selected_fused_score = float(fused_scores[selected_idx].item())
         elif method == "weighted_borda":
+            # Lower is better. Action weight is fixed at 1.0; video is configurable.
             fused_scores = action_ranks_f + float(self.tts_video_weight) * video_ranks_f
-            fused_score_direction = "lower_is_better"
-            fused_order = torch.argsort(fused_scores, descending=False)
             selected_idx = int(torch.argmin(fused_scores).item())
-            effective_weight = float(self.tts_video_weight)
+            fused_order = torch.argsort(fused_scores, descending=False)
+            fused_score_direction = "lower_is_better"
+            selected_fused_score = float(fused_scores[selected_idx].item())
         elif method == "rrf":
+            # Higher is better. Use small rrf_k for small TTS candidate sets (e.g., K=8/16/32).
             denom_action = float(self.tts_rrf_k) + action_ranks_f + 1.0
             denom_video = float(self.tts_rrf_k) + video_ranks_f + 1.0
             fused_scores = (1.0 / denom_action) + (float(self.tts_video_weight) / denom_video)
-            fused_score_direction = "higher_is_better"
-            fused_order = torch.argsort(fused_scores, descending=True)
             selected_idx = int(torch.argmax(fused_scores).item())
-            effective_weight = float(self.tts_video_weight)
+            fused_order = torch.argsort(fused_scores, descending=True)
+            fused_score_direction = "higher_is_better"
+            selected_fused_score = float(fused_scores[selected_idx].item())
         else:
             raise ValueError(
                 f"Unknown tts_rank_fusion_method={method}. "
@@ -1028,237 +844,91 @@ class MotusPolicy:
 
         fused_ranks = torch.empty_like(fused_order)
         fused_ranks[fused_order] = torch.arange(k, dtype=fused_order.dtype, device=fused_order.device)
-        selection_probs = torch.zeros(k, dtype=torch.float32, device=fused_scores.device)
+
+        selection_probs = torch.zeros(k, dtype=torch.float32, device=action_avg_l2.device)
         selection_probs[selected_idx] = 1.0
 
-        metrics = self._build_video_fusion_metrics(
-            tts_method="video_rank_fusion",
-            selection_stage=f"video_{self.tts_video_feature}_{method}",
-            rank_fusion_method=method,
-            selected_idx=selected_idx,
-            fused_scores=fused_scores,
-            fused_ranks=fused_ranks,
-            fused_score_direction=fused_score_direction,
-            video_weight=effective_weight,
-            common=common,
-            selection_probs=selection_probs,
-            selected_prob=1.0,
-        )
-        return selected_idx, common["action_pairwise_l2"], common["action_avg_l2"], metrics
-
-    def _select_tts_video_cluster_fusion(
-        self,
-        actions_stack: torch.Tensor,
-        video_features_stack: torch.Tensor,
-    ):
-        """Action-space cluster gate followed by local weighted action/video rank fusion."""
-        common = self._compute_video_common_tensors(actions_stack, video_features_stack)
-        k = actions_stack.shape[0]
-        flat_actions = common["flat_actions"]
-        action_pairwise_l2 = common["action_pairwise_l2"]
-        video_pairwise_l2 = common["video_pairwise_l2"]
-
-        global_medoid_idx, action_avg_l2, s_score = self._compute_global_medoid_and_guard(
-            flat_actions=flat_actions,
-            pairwise_l2=action_pairwise_l2,
-        )
-        use_all_candidates = s_score < self.tts_tau or self.tts_num_clusters <= 1
-
-        if use_all_candidates:
-            candidate_indices = torch.arange(k, dtype=torch.long, device=action_avg_l2.device)
-            local_action_scores = action_avg_l2
-            local_video_scores = common["video_avg_l2"]
-            selection_stage = "cluster_guard_weighted_borda" if s_score < self.tts_tau else "no_cluster_weighted_borda"
-            unimodal = bool(s_score < self.tts_tau)
-            num_clusters = 1
-            selected_cluster = -1
-            selected_cluster_size = k
-            cluster_counts = ""
-            cluster_ids = ""
-            rank_fusion_scope = "global_all"
+        action_median = self._upper_tri_median(action_pairwise_l2)
+        video_median = self._upper_tri_median(video_pairwise_l2)
+        if action_median > 1e-12:
+            video_action_median_ratio = video_median / action_median
         else:
-            num_clusters = min(self.tts_num_clusters, k)
-            cluster_ids_tensor = self._kmeans_small(
-                flat_actions,
-                num_clusters=num_clusters,
-                max_iter=self.tts_kmeans_iters,
-            )
-            cluster_counts_tensor = torch.bincount(cluster_ids_tensor, minlength=num_clusters)
-            selected_cluster = int(torch.argmax(cluster_counts_tensor).item())
-            mask = cluster_ids_tensor == selected_cluster
-            candidate_indices = mask.nonzero(as_tuple=True)[0]
-            selected_cluster_size = int(cluster_counts_tensor[selected_cluster].item())
+            video_action_median_ratio = float("inf") if video_median > 0 else 0.0
 
-            action_sub_dists = action_pairwise_l2[mask][:, mask]
-            video_sub_dists = video_pairwise_l2[mask][:, mask]
-            if selected_cluster_size <= 1:
-                local_action_scores = torch.zeros(selected_cluster_size, dtype=action_pairwise_l2.dtype, device=action_pairwise_l2.device)
-                local_video_scores = torch.zeros(selected_cluster_size, dtype=video_pairwise_l2.dtype, device=video_pairwise_l2.device)
-            else:
-                local_action_scores = action_sub_dists.sum(dim=1) / (selected_cluster_size - 1)
-                local_video_scores = video_sub_dists.sum(dim=1) / (selected_cluster_size - 1)
+        metrics = {
+            "tts_method": "video_rank_fusion",
+            "selection_stage": f"video_{self.tts_video_feature}_{method}",
+            "rank_fusion_method": method,
+            "video_feature_type": self.tts_video_feature,
+            "video_weight": f"{float(self.tts_video_weight):.8f}",
+            "rrf_k": f"{float(self.tts_rrf_k):.8f}",
 
-            selection_stage = "cluster_weighted_borda"
-            unimodal = False
-            cluster_counts = "|".join(map(str, cluster_counts_tensor.detach().cpu().tolist()))
-            cluster_ids = "|".join(map(str, cluster_ids_tensor.detach().cpu().tolist()))
-            rank_fusion_scope = "local_cluster"
+            # Keep legacy fields meaningful: global_medoid_idx/avg_l2 refer to action space.
+            "global_medoid_idx": action_best_idx,
+            "unimodal": "",
+            "s_score": "",
+            "num_clusters": 1,
+            "selected_cluster": -1,
+            "selected_cluster_size": k,
+            "cluster_counts": "",
+            "cluster_ids": "",
 
-        local_action_ranks, _ = self._build_tts_ranks(local_action_scores)
-        local_video_ranks, _ = self._build_tts_ranks(local_video_scores)
-        local_fused_scores = local_action_ranks.to(torch.float32) + float(self.tts_video_weight) * local_video_ranks.to(torch.float32)
-        local_fused_order = torch.argsort(local_fused_scores, descending=False)
-        local_fused_ranks = torch.empty_like(local_fused_order)
-        local_fused_ranks[local_fused_order] = torch.arange(
-            local_fused_order.numel(),
-            dtype=local_fused_order.dtype,
-            device=local_fused_order.device,
-        )
+            "selected_idx": selected_idx,
+            "selected_rank": int(fused_ranks[selected_idx].item()),
+            "selected_prob": "1.00000000",
+            "rank_temperature": "",
+            "rank_ids": "|".join(map(str, fused_ranks.detach().cpu().tolist())),
+            "selection_probs": self._format_float_list(selection_probs, precision=8),
 
-        selected_local_idx = int(torch.argmin(local_fused_scores).item())
-        selected_idx = int(candidate_indices[selected_local_idx].item())
+            # Detailed rank-fusion diagnostics.
+            "selected_fused_rank": int(fused_ranks[selected_idx].item()),
+            "selected_fused_score": f"{selected_fused_score:.8f}",
+            "fused_score_direction": fused_score_direction,
+            "fused_score_higher_is_better": fused_score_direction == "higher_is_better",
+            "fused_scores": self._format_float_list(fused_scores, precision=8),
 
-        fused_scores = torch.full((k,), float("inf"), dtype=torch.float32, device=local_fused_scores.device)
-        fused_scores[candidate_indices] = local_fused_scores
-        fused_ranks = torch.full((k,), -1, dtype=torch.long, device=local_fused_scores.device)
-        fused_ranks[candidate_indices] = local_fused_ranks
-        selection_probs = torch.zeros(k, dtype=torch.float32, device=local_fused_scores.device)
-        selection_probs[selected_idx] = 1.0
+            "selected_action_rank": int(action_ranks[selected_idx].item()),
+            "selected_video_rank": int(video_ranks[selected_idx].item()),
+            "selected_video_avg_l2": f"{float(video_avg_l2[selected_idx].item()):.8f}",
+            "action_best_idx": action_best_idx,
+            "video_best_idx": video_best_idx,
+            "action_global_medoid_idx": action_best_idx,
+            "video_global_medoid_idx": video_best_idx,
+            "rank_agree": bool(action_best_idx == video_best_idx),
+            "rank_spearman": self._spearman_from_ranks(action_ranks, video_ranks),
+            "spearman_rank_corr": self._spearman_from_ranks(action_ranks, video_ranks),
 
-        local_action_rank_ids = torch.full((k,), -1, dtype=torch.long, device=local_fused_scores.device)
-        local_video_rank_ids = torch.full((k,), -1, dtype=torch.long, device=local_fused_scores.device)
-        local_action_rank_ids[candidate_indices] = local_action_ranks
-        local_video_rank_ids[candidate_indices] = local_video_ranks
+            "action_rank_ids": "|".join(map(str, action_ranks.detach().cpu().tolist())),
+            "video_rank_ids": "|".join(map(str, video_ranks.detach().cpu().tolist())),
+            "action_avg_l2": self._format_float_list(action_avg_l2, precision=6),
+            "video_avg_l2": self._format_float_list(video_avg_l2, precision=6),
 
-        extra = {
-            "global_medoid_idx": global_medoid_idx,
-            "candidate_pool_ids": "|".join(map(str, candidate_indices.detach().cpu().tolist())),
-            "candidate_pool_size": int(candidate_indices.numel()),
-            "rank_fusion_scope": rank_fusion_scope,
-            "fusion_scope": rank_fusion_scope,
-            "selected_local_idx": selected_local_idx,
-            "selected_local_action_rank": int(local_action_ranks[selected_local_idx].item()),
-            "selected_local_video_rank": int(local_video_ranks[selected_local_idx].item()),
-            "selected_local_fused_rank": int(local_fused_ranks[selected_local_idx].item()),
-            "selected_local_fused_score": f"{float(local_fused_scores[selected_local_idx].item()):.8f}",
-            "local_action_rank_ids": "|".join(map(str, local_action_rank_ids.detach().cpu().tolist())),
-            "local_video_rank_ids": "|".join(map(str, local_video_rank_ids.detach().cpu().tolist())),
-            "local_fused_rank_ids": "|".join(map(str, fused_ranks.detach().cpu().tolist())),
-            "local_fused_scores": self._format_float_list(local_fused_scores, precision=8),
+            "action_avg_l2_min": f"{float(action_avg_l2.min().item()):.8f}",
+            "action_avg_l2_max": f"{float(action_avg_l2.max().item()):.8f}",
+            "action_avg_l2_mean": f"{float(action_avg_l2.mean().item()):.8f}",
+            "action_avg_l2_std": f"{float(action_avg_l2.std(unbiased=False).item()):.8f}",
+            "video_avg_l2_min": f"{float(video_avg_l2.min().item()):.8f}",
+            "video_avg_l2_max": f"{float(video_avg_l2.max().item()):.8f}",
+            "video_avg_l2_mean": f"{float(video_avg_l2.mean().item()):.8f}",
+            "video_avg_l2_std": f"{float(video_avg_l2.std(unbiased=False).item()):.8f}",
+            "video_min_avg_l2": f"{float(video_avg_l2.min().item()):.8f}",
+            "video_max_avg_l2": f"{float(video_avg_l2.max().item()):.8f}",
+            "video_mean_avg_l2": f"{float(video_avg_l2.mean().item()):.8f}",
+            "video_std_avg_l2": f"{float(video_avg_l2.std(unbiased=False).item()):.8f}",
+            "action_pairwise_median": f"{action_median:.8f}",
+            "video_pairwise_median": f"{video_median:.8f}",
+            "video_action_median_ratio": f"{video_action_median_ratio:.8f}",
+            "distance_ratio_video_over_action": f"{video_action_median_ratio:.8f}",
+            "video_action_distance_ratio": f"{video_action_median_ratio:.8f}",
+            "fused_rank_ids": "|".join(map(str, fused_ranks.detach().cpu().tolist())),
+            "action_feature_dim": flat_actions.shape[1],
+            "video_feature_dim": flat_video.shape[1],
+            "action_feature_norm_mean": f"{float(torch.norm(flat_actions, dim=1).mean().item()):.8f}",
+            "video_feature_norm_mean": f"{float(torch.norm(flat_video, dim=1).mean().item()):.8f}",
         }
-        metrics = self._build_video_fusion_metrics(
-            tts_method="video_cluster_fusion",
-            selection_stage=f"video_{self.tts_video_feature}_{selection_stage}",
-            rank_fusion_method="weighted_borda",
-            selected_idx=selected_idx,
-            fused_scores=fused_scores,
-            fused_ranks=fused_ranks,
-            fused_score_direction="lower_is_better",
-            video_weight=float(self.tts_video_weight),
-            common=common,
-            selection_probs=selection_probs,
-            selected_prob=1.0,
-            num_clusters=num_clusters,
-            selected_cluster=selected_cluster,
-            selected_cluster_size=selected_cluster_size,
-            cluster_counts=cluster_counts,
-            cluster_ids=cluster_ids,
-            unimodal=unimodal,
-            s_score=f"{s_score:.8f}",
-            extra=extra,
-        )
+
+        # Return action-space pairwise/avg_l2 as the legacy primary scores.
         return selected_idx, action_pairwise_l2, action_avg_l2, metrics
-
-    def _select_tts_video_fusion_rank_softmax(
-        self,
-        actions_stack: torch.Tensor,
-        video_features_stack: torch.Tensor,
-    ):
-        """Global weighted action/video rank fusion followed by softmax sampling."""
-        common = self._compute_video_common_tensors(actions_stack, video_features_stack)
-        action_ranks_f = common["action_ranks"].to(torch.float32)
-        video_ranks_f = common["video_ranks"].to(torch.float32)
-        fused_scores = action_ranks_f + float(self.tts_video_weight) * video_ranks_f
-        fused_order = torch.argsort(fused_scores, descending=False)
-        fused_ranks = torch.empty_like(fused_order)
-        fused_ranks[fused_order] = torch.arange(fused_order.numel(), dtype=fused_order.dtype, device=fused_order.device)
-
-        rank_tau = max(1e-8, float(self.tts_rank_tau))
-        selection_probs = torch.softmax(-fused_scores / rank_tau, dim=0)
-        selected_idx = int(torch.multinomial(selection_probs, num_samples=1).item())
-        selected_prob = float(selection_probs[selected_idx].item())
-
-        metrics = self._build_video_fusion_metrics(
-            tts_method="video_fusion_rank_softmax",
-            selection_stage=f"video_{self.tts_video_feature}_weighted_borda_rank_softmax",
-            rank_fusion_method="weighted_borda",
-            selected_idx=selected_idx,
-            fused_scores=fused_scores,
-            fused_ranks=fused_ranks,
-            fused_score_direction="lower_is_better",
-            video_weight=float(self.tts_video_weight),
-            common=common,
-            selection_probs=selection_probs,
-            selected_prob=selected_prob,
-            rank_temperature=f"{float(self.tts_rank_tau):.8f}",
-        )
-        return selected_idx, common["action_pairwise_l2"], common["action_avg_l2"], metrics
-
-    def _select_tts_video_gated_fusion(
-        self,
-        actions_stack: torch.Tensor,
-        video_features_stack: torch.Tensor,
-    ):
-        """Weighted action/video rank fusion with a simple rank-consistency gate."""
-        common = self._compute_video_common_tensors(actions_stack, video_features_stack)
-        spearman_value = self._spearman_value_from_ranks(common["action_ranks"], common["video_ranks"])
-        _, _, distance_ratio = self._video_distance_ratio(common["action_pairwise_l2"], common["video_pairwise_l2"])
-
-        spearman_gate_pass = spearman_value is not None and np.isfinite(float(spearman_value)) and float(spearman_value) >= float(self.tts_gate_spearman_thresh)
-        distance_gate_pass = np.isfinite(float(distance_ratio)) and float(distance_ratio) <= float(self.tts_gate_distance_ratio_thresh)
-        gate_pass = bool(spearman_gate_pass and distance_gate_pass)
-        effective_weight = float(self.tts_video_weight if gate_pass else self.tts_video_weight_low)
-
-        action_ranks_f = common["action_ranks"].to(torch.float32)
-        video_ranks_f = common["video_ranks"].to(torch.float32)
-        fused_scores = action_ranks_f + effective_weight * video_ranks_f
-        fused_order = torch.argsort(fused_scores, descending=False)
-        fused_ranks = torch.empty_like(fused_order)
-        fused_ranks[fused_order] = torch.arange(fused_order.numel(), dtype=fused_order.dtype, device=fused_order.device)
-        selected_idx = int(torch.argmin(fused_scores).item())
-        selection_probs = torch.zeros(fused_scores.numel(), dtype=torch.float32, device=fused_scores.device)
-        selection_probs[selected_idx] = 1.0
-
-        gate_state = "pass" if gate_pass else "fallback"
-        extra = {
-            "gate_pass": bool(gate_pass),
-            "gate_state": gate_state,
-            "spearman_gate_pass": bool(spearman_gate_pass),
-            "distance_gate_pass": bool(distance_gate_pass),
-            "gate_rank_spearman": "" if spearman_value is None else f"{float(spearman_value):.8f}",
-            "gate_distance_ratio": f"{float(distance_ratio):.8f}",
-            "gate_rank_spearman_thresh": f"{float(self.tts_gate_spearman_thresh):.8f}",
-            "gate_spearman_thresh": f"{float(self.tts_gate_spearman_thresh):.8f}",
-            "gate_distance_ratio_thresh": f"{float(self.tts_gate_distance_ratio_thresh):.8f}",
-            "fallback_video_weight": f"{float(self.tts_video_weight_low):.8f}",
-            "rank_fusion_scope": "global_all",
-            "fusion_scope": "global_all",
-        }
-        metrics = self._build_video_fusion_metrics(
-            tts_method="video_gated_fusion",
-            selection_stage=f"video_{self.tts_video_feature}_gated_weighted_borda_{gate_state}",
-            rank_fusion_method="weighted_borda",
-            selected_idx=selected_idx,
-            fused_scores=fused_scores,
-            fused_ranks=fused_ranks,
-            fused_score_direction="lower_is_better",
-            video_weight=effective_weight,
-            common=common,
-            selection_probs=selection_probs,
-            selected_prob=1.0,
-            extra=extra,
-        )
-        return selected_idx, common["action_pairwise_l2"], common["action_avg_l2"], metrics
 
     # tts add
     def _compute_global_medoid_and_guard(
@@ -1504,13 +1174,11 @@ class MotusPolicy:
             global_medoid_avg_l2 = f"{float(avg_l2_np[int(global_medoid_idx)]):.8f}"
 
         video_msg = ""
-        if metrics.get("video_feature_type", "") != "":
+        if metrics.get("tts_method", self.tts_method) == "video_rank_fusion":
             video_msg = (
                 f" rank_fusion={metrics.get('rank_fusion_method', '')}"
                 f" video_feature={metrics.get('video_feature_type', '')}"
                 f" video_weight={metrics.get('video_weight', '')}"
-                f" effective_video_weight={metrics.get('effective_video_weight', '')}"
-                f" gate_state={metrics.get('gate_state', '')}"
                 f" rrf_k={metrics.get('rrf_k', '')}"
                 f" action_best={metrics.get('action_best_idx', '')}"
                 f" video_best={metrics.get('video_best_idx', '')}"
@@ -1562,22 +1230,15 @@ class MotusPolicy:
 
         video_columns = [
             "rank_fusion_method", "video_feature_type", "action_feature_dim", "video_feature_dim",
-            "video_weight", "configured_video_weight", "effective_video_weight", "video_weight_low",
-            "fallback_video_weight", "rrf_k", "fused_score_direction",
-            "action_best_idx", "video_best_idx", "rank_agree", "rank_spearman", "spearman_rank_corr",
+            "video_weight", "rrf_k", "fused_score_direction",
+            "action_best_idx", "video_best_idx", "rank_agree", "rank_spearman",
             "selected_action_rank", "selected_video_rank", "selected_fused_rank", "selected_fused_score",
             "action_rank_ids", "video_rank_ids", "fused_rank_ids", "fused_scores",
             "action_avg_l2_min", "action_avg_l2_max", "action_avg_l2_mean", "action_avg_l2_std",
             "video_avg_l2_min", "video_avg_l2_max", "video_avg_l2_mean", "video_avg_l2_std",
-            "action_pairwise_median", "video_pairwise_median", "distance_ratio_video_over_action", "video_action_distance_ratio",
+            "action_pairwise_median", "video_pairwise_median", "distance_ratio_video_over_action",
             "action_feature_norm_mean", "video_feature_norm_mean",
             "action_avg_l2", "video_avg_l2",
-            "rank_fusion_scope", "fusion_scope", "candidate_pool_ids", "candidate_pool_size",
-            "selected_local_idx", "selected_local_action_rank", "selected_local_video_rank", "selected_local_fused_rank",
-            "selected_local_fused_score", "local_action_rank_ids", "local_video_rank_ids", "local_fused_rank_ids", "local_fused_scores",
-            "gate_pass", "gate_state", "gate_rank_spearman", "gate_distance_ratio",
-            "gate_rank_spearman_thresh", "gate_spearman_thresh", "gate_distance_ratio_thresh",
-            "spearman_gate_pass", "distance_gate_pass",
         ]
 
         with open(summary_path, "a", newline="") as f:
@@ -1635,7 +1296,7 @@ class MotusPolicy:
         num_inference_steps = self.config_dict['model']['inference']['num_inference_timesteps']
 
         if self.tts_enable and self.tts_num_samples > 1:
-            use_video_feature = self.tts_method in VIDEO_TTS_METHODS
+            use_video_rank_fusion = self.tts_method == "video_rank_fusion"
             action_candidates = []
             frame_candidates = []
             video_feature_candidates = []
@@ -1651,11 +1312,11 @@ class MotusPolicy:
                     num_inference_steps=num_inference_steps,
                     batch_size=cur_bs,
                     decode_video=self.tts_decode_video,
-                    return_video_feature=use_video_feature,
+                    return_video_feature=use_video_rank_fusion,
                     video_feature_type=self.tts_video_feature,
                 )
 
-                if use_video_feature:
+                if use_video_rank_fusion:
                     cand_frames_b, cand_actions_b, cand_video_features_b = out
                 else:
                     cand_frames_b, cand_actions_b = out
@@ -1663,7 +1324,7 @@ class MotusPolicy:
 
                 for local_idx in range(cur_bs):
                     action_candidates.append(cand_actions_b[local_idx].detach().float().cpu())
-                    if use_video_feature:
+                    if use_video_rank_fusion:
                         video_feature_candidates.append(cand_video_features_b[local_idx].detach().float().cpu())
                     if cand_frames_b is None:
                         frame_candidates.append(None)
@@ -1673,7 +1334,7 @@ class MotusPolicy:
                 remaining -= cur_bs
             
             actions_stack = torch.stack(action_candidates, dim=0)
-            if use_video_feature:
+            if use_video_rank_fusion:
                 video_features_stack = torch.stack(video_feature_candidates, dim=0)
                 selected_idx, pairwise_l2, avg_l2, metrics = self._select_tts_action(
                     actions_stack,
@@ -1874,9 +1535,6 @@ def get_model(usr_args):
     )
     tts_video_weight = float(usr_args.get("tts_video_weight", DEFAULT_TTS_VIDEO_WEIGHT))
     tts_rrf_k = float(usr_args.get("tts_rrf_k", DEFAULT_TTS_RRF_K))
-    tts_video_weight_low = float(usr_args.get("tts_video_weight_low", DEFAULT_TTS_VIDEO_WEIGHT_LOW))
-    tts_gate_spearman_thresh = float(usr_args.get("tts_gate_spearman_thresh", DEFAULT_TTS_GATE_SPEARMAN_THRESH))
-    tts_gate_distance_ratio_thresh = float(usr_args.get("tts_gate_distance_ratio_thresh", DEFAULT_TTS_GATE_DISTANCE_RATIO_THRESH))
     
     policy = MotusPolicy(
         checkpoint_path=checkpoint_path,
@@ -1902,9 +1560,6 @@ def get_model(usr_args):
         tts_rank_fusion_method=tts_rank_fusion_method,
         tts_video_weight=tts_video_weight,
         tts_rrf_k=tts_rrf_k,
-        tts_video_weight_low=tts_video_weight_low,
-        tts_gate_spearman_thresh=tts_gate_spearman_thresh,
-        tts_gate_distance_ratio_thresh=tts_gate_distance_ratio_thresh,
     )
     
     return policy

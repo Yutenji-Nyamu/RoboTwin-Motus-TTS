@@ -60,3 +60,11 @@ policy/Motus/logs_single_*/
 
 # Evaluation outputs
 eval_result/
+
+# Motus generated evaluation logs and visualization outputs
+policy/Motus/plot/
+policy/Motus/logs/
+policy/Motus/logs_single_*/
+policy/Motus/__pycache__/
+policy/Motus/*.pyc
+policy/Motus/.ipynb_checkpoints/

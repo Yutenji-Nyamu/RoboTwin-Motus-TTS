@@ -21,14 +21,11 @@ TTS_ENABLE=False
 TTS_NUM_SAMPLES=8
 
 # Selection method:
-#   global_medoid:                average-L2/global-medoid selection
-#   keystone:                     KeyStone-style guard + kmeans + largest-cluster medoid
-#   rank_softmax:                 rank-based stochastic selection, P(i)=softmax(-rank_i/tau)
-#   cluster_rank_softmax:         guard + kmeans largest-cluster + local rank-softmax
-#   video_rank_fusion:            action/video rank-level late fusion
-#   video_cluster_fusion:         action cluster gate + local weighted action/video rank fusion
-#   video_fusion_rank_softmax:    global weighted action/video rank fusion + softmax sampling
-#   video_gated_fusion:           weighted action/video rank fusion with rank-consistency gate
+#   global_medoid:          average-L2/global-medoid selection
+#   keystone:               KeyStone-style guard + kmeans + largest-cluster medoid
+#   rank_softmax:           rank-based stochastic selection, P(i)=softmax(-rank_i/tau)
+#   cluster_rank_softmax:   guard + kmeans largest-cluster + local rank-softmax
+#   video_rank_fusion:      action/video-latent rank-level late fusion
 TTS_METHOD="global_medoid"
 
 # KeyStone defaults
@@ -66,15 +63,9 @@ TTS_SAVE_FULL_ACTIONS=False
 TTS_VIDEO_ENABLE=False
 TTS_VIDEO_FEATURE="latent"
 # Rank fusion method: borda | weighted_borda | rrf
-# New video_cluster/video_fusion_rank_softmax/video_gated selectors use weighted_borda internally.
-TTS_RANK_FUSION_METHOD="weighted_borda"
+TTS_RANK_FUSION_METHOD="rrf"
 TTS_VIDEO_WEIGHT=0.5
 TTS_RRF_K=1
-
-# Rank-consistency gate for --tts-method video_gated_fusion.
-TTS_VIDEO_WEIGHT_LOW=0.0
-TTS_GATE_SPEARMAN_THRESH=0.3
-TTS_GATE_DISTANCE_RATIO_THRESH=2.0
 # ttsv2 add end
 
 while [[ $# -gt 0 ]]; do
@@ -159,18 +150,6 @@ while [[ $# -gt 0 ]]; do
             TTS_RRF_K="$2"
             shift 2
             ;;
-        --tts-video-weight-low)
-            TTS_VIDEO_WEIGHT_LOW="$2"
-            shift 2
-            ;;
-        --tts-gate-spearman-thresh)
-            TTS_GATE_SPEARMAN_THRESH="$2"
-            shift 2
-            ;;
-        --tts-gate-distance-ratio-thresh)
-            TTS_GATE_DISTANCE_RATIO_THRESH="$2"
-            shift 2
-            ;;
         *)
             echo "Unknown argument: $1"
             exit 1
@@ -178,12 +157,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# If the selector is video-informed, enable video features automatically.
-case "$TTS_METHOD" in
-    video_rank_fusion|video_cluster_fusion|video_fusion_rank_softmax|video_gated_fusion)
-        TTS_VIDEO_ENABLE=True
-        ;;
-esac
+# If the selector is the video-informed rank fusion method, enable video features automatically.
+if [ "$TTS_METHOD" = "video_rank_fusion" ]; then
+    TTS_VIDEO_ENABLE=True
+fi
 
 # GPU_ID=0                       # GPU to use
 
@@ -351,9 +328,6 @@ echo "TTS Video Feature: $TTS_VIDEO_FEATURE"
 echo "TTS Rank Fusion:   $TTS_RANK_FUSION_METHOD"
 echo "TTS Video Weight:  $TTS_VIDEO_WEIGHT"
 echo "TTS RRF K:         $TTS_RRF_K"
-echo "TTS Video W Low:   $TTS_VIDEO_WEIGHT_LOW"
-echo "TTS Gate Spearman: $TTS_GATE_SPEARMAN_THRESH"
-echo "TTS Gate DistRatio:$TTS_GATE_DISTANCE_RATIO_THRESH"
 echo "================================================================"
 echo ""
 
@@ -402,9 +376,6 @@ PYTHONWARNINGS=ignore::UserWarning \
     --tts_rank_fusion_method "${TTS_RANK_FUSION_METHOD}" \
     --tts_video_weight "${TTS_VIDEO_WEIGHT}" \
     --tts_rrf_k "${TTS_RRF_K}" \
-    --tts_video_weight_low "${TTS_VIDEO_WEIGHT_LOW}" \
-    --tts_gate_spearman_thresh "${TTS_GATE_SPEARMAN_THRESH}" \
-    --tts_gate_distance_ratio_thresh "${TTS_GATE_DISTANCE_RATIO_THRESH}" \
     2>&1 | tee "$log_file"
 
 #############
