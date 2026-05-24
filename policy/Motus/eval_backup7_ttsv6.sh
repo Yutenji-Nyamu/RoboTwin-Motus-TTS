@@ -29,7 +29,6 @@ TTS_NUM_SAMPLES=8
 #   video_cluster_fusion:         action cluster gate + local weighted action/video rank fusion
 #   video_fusion_rank_softmax:    global weighted action/video rank fusion + softmax sampling
 #   video_gated_fusion:           weighted action/video rank fusion with rank-consistency gate
-#   video_all_fusion:             gated + clustered + stochastic action/video rank fusion
 TTS_METHOD="global_medoid"
 
 # KeyStone defaults
@@ -67,12 +66,12 @@ TTS_SAVE_FULL_ACTIONS=False
 TTS_VIDEO_ENABLE=False
 TTS_VIDEO_FEATURE="latent"
 # Rank fusion method: borda | weighted_borda | rrf
-# New video_cluster/video_fusion_rank_softmax/video_gated/video_all selectors use weighted_borda internally by default.
+# New video_cluster/video_fusion_rank_softmax/video_gated selectors use weighted_borda internally.
 TTS_RANK_FUSION_METHOD="weighted_borda"
 TTS_VIDEO_WEIGHT=0.5
 TTS_RRF_K=1
 
-# Rank-consistency gate for --tts-method video_gated_fusion and video_all_fusion.
+# Rank-consistency gate for --tts-method video_gated_fusion.
 TTS_VIDEO_WEIGHT_LOW=0.0
 TTS_GATE_SPEARMAN_THRESH=0.3
 TTS_GATE_DISTANCE_RATIO_THRESH=2.0
@@ -181,7 +180,7 @@ done
 
 # If the selector is video-informed, enable video features automatically.
 case "$TTS_METHOD" in
-    video_rank_fusion|video_cluster_fusion|video_fusion_rank_softmax|video_gated_fusion|video_all_fusion)
+    video_rank_fusion|video_cluster_fusion|video_fusion_rank_softmax|video_gated_fusion)
         TTS_VIDEO_ENABLE=True
         ;;
 esac
